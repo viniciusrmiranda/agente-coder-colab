@@ -3,7 +3,7 @@ groq
 duckduckgo-search
 authlib
 pypdf
-
+ollama
 mem0ai
 
 mem0ai
