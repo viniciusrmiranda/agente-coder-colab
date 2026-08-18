@@ -135,6 +135,9 @@ def carregar_perfil(email):
 def salvar_perfil(email, categoria, chave, valor):
     if not chave or not valor:
         return False
+    # Limpeza: se a chave for "cidade" e o valor for "mulheres", isso é um erro; vamos ignorar.
+    # Mas para não perder, vamos apenas salvar com a categoria correta.
+    # O ideal é que o LLM classifique corretamente.
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     c.execute(
@@ -154,13 +157,12 @@ def deletar_memoria(email, categoria, chave):
 
 # --- EXTRAÇÃO DE MEMÓRIAS (HÍBRIDA: REGEX + LLM) ---
 def extrair_memorias_por_regex(texto):
-    """Tenta capturar informações com regex (fallback rápido)."""
+    """Tenta capturar informações com regex."""
     padroes = {
         "nome": r"(?:meu nome é|eu sou|chamo-me|me chamo|sou o|sou a|me chamo de)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
-        "cidade": r"(?:moro em|sou de|resido em|de)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
-        "profissão": r"(?:sou|trabalho como|atualmente sou|profissão|trabalho com)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:desenvolvedor|engenheiro|analista|designer|gerente|estudante|professor|advogado|médico|arquiteto))",
+        "cidade": r"(?:moro em|sou de|resido em|de)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:[A-Za-zÀ-ÖØ-öø-ÿ\s]*))",
+        "profissão": r"(?:sou|trabalho como|atualmente sou|profissão|trabalho com)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:desenvolvedor|engenheiro|analista|designer|gerente|estudante|professor|advogado|médico|arquiteto|programador))",
         "filho": r"(?:meu filho|minha filha|meu menino|minha menina|meu pequeno|minha pequena)\s+(?:se chama|chama-se|é)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
-        "filho_nome": r"(?:ele se chama|ela se chama|chama-se)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",  # captura "ele se chama José"
         "esposa": r"(?:minha esposa|minha mulher|minha namorada|meu marido|meu namorado)\s+(?:se chama|chama-se|é)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
     }
     encontrados = {}
@@ -182,7 +184,6 @@ def extrair_memorias_por_llm(historico_completo, email):
     
     categorias = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
     
-    # Monta o diálogo completo
     dialogo = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in historico_completo])
     
     prompt = f"""
@@ -192,11 +193,17 @@ def extrair_memorias_por_llm(historico_completo, email):
     
     **REGRAS IMPORTANTES:**
     1. Considere como RELEVANTE absolutamente TUDO que o usuário disser sobre si mesmo ou sobre pessoas próximas. Nomes de filhos, idades, hobbies, etc. são extremamente importantes.
-    2. Se o usuário mencionou o nome de alguém (ex: "meu filho se chama José"), extraia isso como uma memória.
-    3. Não descarte informações por achá-las triviais.
-    
-    Para cada informação extraída, defina uma CATEGORIA entre: {', '.join(categorias)}.
-    Use 'Você' para informações pessoais (nome, idade, família), 'Tópicos' para assuntos de interesse, 'Interesses' para hobbies, 'Recent Work' para projetos recentes, 'Skills' para habilidades técnicas, 'Study' para estudos, 'Writing Style' para estilo de escrita, 'Áreas' para áreas de atuação.
+    2. Classifique CADA informação na categoria mais apropriada:
+       - "Você" para informações pessoais (nome, idade, família, relacionamentos).
+       - "Tópicos" para assuntos de interesse geral.
+       - "Interesses" para hobbies e paixões.
+       - "Recent Work" para projetos recentes.
+       - "Skills" para habilidades técnicas.
+       - "Study" para estudos.
+       - "Writing Style" para estilo de escrita.
+       - "Áreas" para áreas de atuação.
+    3. NUNCA coloque informações pessoais (como "mulheres") na categoria "cidade". Cidade é apenas para localização geográfica.
+    4. Se o usuário mencionar algo vago como "gosto de mulheres", categorize como "Interesses" com chave "interesse" e valor "mulheres".
     
     Retorne APENAS um objeto JSON válido com a estrutura:
     {{
@@ -228,6 +235,9 @@ def extrair_memorias_por_llm(historico_completo, email):
             chave = mem.get("chave", "").strip()
             valor = mem.get("valor", "").strip()
             if chave and valor and categoria in categorias:
+                # CORREÇÃO: se categoria for "cidade" e valor for "mulheres", ignore (erro de classificação)
+                if categoria == "cidade" and valor.lower() in ["mulheres", "mulher"]:
+                    continue
                 if salvar_perfil(email, categoria, chave, valor):
                     salvou = True
                     st.toast(f"🧠 Memória salva: {chave} -> {valor}", icon="✅")
@@ -252,7 +262,7 @@ def extrair_memorias_automaticamente(historico_completo, email):
                     salvou = True
                     st.toast(f"🧠 Memória salva: {chave} -> {valor}", icon="✅")
     
-    # 2. SEMPRE chama o LLM para capturar informações implícitas
+    # 2. LLM (sempre chamado para capturar informações implícitas)
     if extrair_memorias_por_llm(historico_completo, email):
         salvou = True
     
@@ -363,7 +373,6 @@ if st.session_state.pagina == "Chat":
         st.session_state.active_chat_id = criar_nova_conversa(user_email)
         st.rerun()
     
-    # Carrega histórico da conversa atual
     messages = carregar_historico_chat(st.session_state.active_chat_id)
     for msg in messages:
         with st.chat_message(msg["role"]):
@@ -372,20 +381,17 @@ if st.session_state.pagina == "Chat":
     chat_prompt = st.chat_input("Digite sua mensagem...")
     
     if chat_prompt:
-        # 1. Salva mensagem do usuário
         salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
         atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
         
         with st.chat_message("user"):
             st.markdown(chat_prompt)
         
-        # 2. Gera resposta do assistente
         with st.chat_message("assistant"):
             with st.spinner("Pensando..."):
                 try:
                     client = Groq(api_key=str(api_key).strip())
                     
-                    # Carrega memórias para o system_prompt
                     perfil = carregar_perfil(user_email)
                     texto_perfil = ""
                     for categoria, itens in perfil.items():
@@ -393,8 +399,9 @@ if st.session_state.pagina == "Chat":
                         for chave, valor in itens.items():
                             texto_perfil += f"{chave}: {valor}\n"
                     
-                    # INSTRUÇÃO: ser conciso e perguntar se houver dúvida
-                    system_prompt = f"""Você é um assistente especialista em programação.
+                    # IDENTIDADE CORRETA + COMPORTAMENTO
+                    system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq (não é GPT-4).
+                    
                     Você se lembra das seguintes informações sobre o usuário (organizadas por categoria):
                     {texto_perfil if texto_perfil else "Nenhuma memória registrada ainda."}
                     
@@ -402,7 +409,8 @@ if st.session_state.pagina == "Chat":
                     1. Seja direto e conciso. Evite respostas longas desnecessárias.
                     2. Se o usuário fizer uma afirmação vaga ou ambígua, PERGUNTE o que ele quer dizer ou como você pode ajudar, em vez de supor e dar explicações extensas.
                     3. Use as memórias para personalizar, mas não fique repetindo informações que você já sabe.
-                    4. Se o usuário mencionar algo novo (como um filho, um interesse, etc.), anote mentalmente, mas não precisa fazer uma lista de tudo — apenas use para contextualizar futuras respostas."""
+                    4. Se o usuário mencionar algo novo (como um filho, um interesse, etc.), anote mentalmente, mas não precisa fazer uma lista de tudo — apenas use para contextualizar futuras respostas.
+                    5. Se perguntarem qual é o seu modelo, diga que você é baseado no {active_model} da Groq."""
                     
                     historico = carregar_historico_chat(st.session_state.active_chat_id)
                     messages_api = [{"role": "system", "content": system_prompt}] + historico
@@ -414,10 +422,8 @@ if st.session_state.pagina == "Chat":
                     bot_reply = chat_completion.choices[0].message.content
                     st.markdown(bot_reply)
                     
-                    # 3. Salva resposta do assistente
                     salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
                     
-                    # 4. Extrai memórias (USANDO O DIÁLOGO COMPLETO)
                     historico_atualizado = carregar_historico_chat(st.session_state.active_chat_id)
                     with st.spinner("🧠 Atualizando memórias..."):
                         salvou = extrair_memorias_automaticamente(historico_atualizado, user_email)
@@ -428,7 +434,6 @@ if st.session_state.pagina == "Chat":
                     st.error(f"⚠️ Erro ao conectar com a Groq: {err}")
 
 else:
-    # --- PÁGINA DE MEMÓRIA ---
     col_back, col_title = st.columns([0.15, 0.85])
     with col_back:
         if st.button("← Voltar", use_container_width=True):
