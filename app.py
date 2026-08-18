@@ -20,36 +20,26 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
-# --- BANCO DE DADOS COM MIGRAÇÃO FORÇADA ---
+# --- BANCO DE DADOS (SQLite Avançado com Migração Robusta) ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     
-    # Verifica se a tabela conversas existe
-    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversas'")
-    tabela_existe = c.fetchone()
+    # Tabela conversas
+    c.execute('''CREATE TABLE IF NOT EXISTS conversas 
+                 (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
+                  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    if not tabela_existe:
-        # Cria do zero com a coluna fixado
-        c.execute('''CREATE TABLE conversas (
-            chat_id TEXT PRIMARY KEY,
-            user_email TEXT,
-            titulo TEXT,
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            fixado INTEGER DEFAULT 0
-        )''')
-    else:
-        # Verifica se a coluna fixado existe
-        c.execute("PRAGMA table_info(conversas)")
-        colunas = [col[1] for col in c.fetchall()]
-        if "fixado" not in colunas:
-            c.execute("ALTER TABLE conversas ADD COLUMN fixado INTEGER DEFAULT 0")
+    # Migração: adiciona coluna fixado se não existir
+    c.execute("PRAGMA table_info(conversas)")
+    colunas = [col[1] for col in c.fetchall()]
+    if "fixado" not in colunas:
+        c.execute("ALTER TABLE conversas ADD COLUMN fixado INTEGER DEFAULT 0")
     
-    # Tabela historico
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
     
-    # Tabela perfil com categoria
+    # Tabela de perfil
     try:
         c.execute("SELECT user_email, categoria, chave, valor FROM perfil LIMIT 1")
     except sqlite3.OperationalError:
@@ -62,7 +52,6 @@ def init_db():
             atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_email, categoria, chave)
         )''')
-    
     conn.commit()
     conn.close()
 
@@ -157,6 +146,7 @@ def salvar_perfil(email, categoria, chave, valor):
     )
     conn.commit()
     conn.close()
+    return True  # indica que salvou
 
 def deletar_memoria(email, categoria, chave):
     conn = sqlite3.connect("memoria_agente.db")
@@ -165,47 +155,41 @@ def deletar_memoria(email, categoria, chave):
     conn.commit()
     conn.close()
 
-# --- EXTRAÇÃO DE MEMÓRIAS (LLM + REGEX FALLBACK) ---
-def extrair_memorias(texto, email):
-    """Tenta LLM, se falhar usa regex. Retorna True se salvou algo."""
-    salvou = False
-    # Tenta LLM
-    try:
-        salvou = extrair_memorias_llm(texto, email)
-    except Exception:
-        pass
-    
-    # Se LLM não salvou nada, tenta regex
-    if not salvou:
-        salvou = extrair_memorias_regex(texto, email)
-    
-    return salvou
-
-def extrair_memorias_llm(texto, email):
+# --- EXTRAÇÃO AUTOMÁTICA DE MEMÓRIAS (USANDO O PRÓPRIO AGENTE) ---
+def extrair_memorias_automaticamente(user_msg, assistant_msg, email):
+    """
+    Usa o modelo llama3-8b-8192 para analisar a conversa e extrair memórias.
+    """
     api_key = st.secrets.get("GROQ_API_KEY")
     if not api_key:
-        return False
+        return
     
-    categorias_possiveis = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
+    categorias = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
     
     prompt = f"""
-    Analise a mensagem do usuário a seguir e extraia fatos importantes sobre ele (como nome, profissão, interesses, projetos, habilidades, etc.).
-    Para cada fato, defina uma categoria entre: {', '.join(categorias_possiveis)}.
-    Retorne APENAS um objeto JSON com a seguinte estrutura:
+    Analise a conversa entre um usuário e um assistente e extraia fatos importantes sobre o usuário.
+    
+    Mensagem do usuário: "{user_msg}"
+    Resposta do assistente: "{assistant_msg}"
+    
+    Identifique informações como: nome, profissão, interesses, projetos, habilidades, preferências, localização, etc.
+    Para cada fato, defina uma categoria entre: {', '.join(categorias)}.
+    Retorne APENAS um objeto JSON válido com a estrutura:
     {{
         "memorias": [
             {{"categoria": "categoria", "chave": "chave_descritiva", "valor": "valor"}}
         ]
     }}
-    Se não houver nenhum fato relevante, retorne {{"memorias": []}}.
-    Mensagem do usuário: "{texto}"
+    Se não houver fatos relevantes, retorne {{"memorias": []}}.
     """
     try:
         client = Groq(api_key=str(api_key).strip())
         response = client.chat.completions.create(
             model="llama3-8b-8192",
-            messages=[{"role": "system", "content": "Você é um assistente especializado em extrair informações."},
-                      {"role": "user", "content": prompt}],
+            messages=[
+                {"role": "system", "content": "Você é um assistente especializado em extrair informações relevantes de conversas."},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0.3,
             response_format={"type": "json_object"}
         )
@@ -216,29 +200,12 @@ def extrair_memorias_llm(texto, email):
             categoria = mem.get("categoria", "Você")
             chave = mem.get("chave", "").strip()
             valor = mem.get("valor", "").strip()
-            if chave and valor and categoria in categorias_possiveis:
-                salvar_perfil(email, categoria, chave, valor)
-                salvou = True
+            if chave and valor and categoria in categorias:
+                if salvar_perfil(email, categoria, chave, valor):
+                    salvou = True
         return salvou
     except Exception:
         return False
-
-def extrair_memorias_regex(texto, email):
-    """Regex para capturar nome, cidade, profissão, interesses."""
-    padroes = {
-        "nome": r"(?:meu nome é|eu sou|chamo-me|me chamo|sou o|sou a)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
-        "cidade": r"(?:moro em|sou de|resido em)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
-        "profissão": r"(?:sou|trabalho como|atualmente sou)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:desenvolvedor|engenheiro|analista|designer|gerente|estudante|professor|arquiteto|cientista))",
-    }
-    salvou = False
-    for chave, padrao in padroes.items():
-        match = re.search(padrao, texto, re.IGNORECASE)
-        if match:
-            valor = match.group(1).strip()
-            if len(valor) > 2:
-                salvar_perfil(email, "Você", chave, valor)
-                salvou = True
-    return salvou
 
 init_db()
 
@@ -333,6 +300,7 @@ with st.sidebar:
 
 # --- ÁREA PRINCIPAL ---
 if st.session_state.pagina == "Chat":
+    # Cabeçalho com botão de três pontinhos
     col_title, col_menu = st.columns([0.85, 0.15])
     with col_title:
         st.title("🤖 Agente Coder")
@@ -353,22 +321,20 @@ if st.session_state.pagina == "Chat":
     chat_prompt = st.chat_input("Digite sua mensagem...")
     
     if chat_prompt:
-        # Extrair memórias automaticamente
-        salvou_memoria = extrair_memorias(chat_prompt, user_email)
-        if salvou_memoria:
-            st.toast("🧠 Memória salva automaticamente!", icon="✅")
-        
+        # Salva mensagem do usuário
         salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
         atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
         
         with st.chat_message("user"):
             st.markdown(chat_prompt)
         
+        # Resposta do assistente
         with st.chat_message("assistant"):
             with st.spinner("Pensando..."):
                 try:
                     client = Groq(api_key=str(api_key).strip())
                     
+                    # Carrega memórias para o system_prompt
                     perfil = carregar_perfil(user_email)
                     texto_perfil = ""
                     for categoria, itens in perfil.items():
@@ -391,7 +357,17 @@ if st.session_state.pagina == "Chat":
                     )
                     bot_reply = chat_completion.choices[0].message.content
                     st.markdown(bot_reply)
+                    
+                    # Salva resposta do assistente
                     salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
+                    
+                    # --- EXTRAÇÃO AUTOMÁTICA DE MEMÓRIAS (APÓS A RESPOSTA) ---
+                    # Usa o modelo para extrair memórias da conversa (último turno)
+                    with st.spinner("🧠 Refletindo sobre a conversa..."):
+                        salvou = extrair_memorias_automaticamente(chat_prompt, bot_reply, user_email)
+                        if salvou:
+                            st.toast("🧠 Nova memória salva!", icon="✅")
+                    
                 except Exception as err:
                     st.error(f"⚠️ Erro ao conectar com a Groq: {err}")
 
