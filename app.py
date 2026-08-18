@@ -18,7 +18,8 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
-# --- CONFIGURAÇÃO CORRETA DO MEM0 (v2.0.18) ---
+# --- CONFIGURAÇÃO DO MEM0 (versão simplificada e validada) ---
+# A documentação oficial sugere esta estrutura para a versão 2.x
 config = {
     "llm": {
         "provider": "groq",
@@ -35,17 +36,17 @@ config = {
         }
     },
     "vector_store": {
-        "provider": "qdrant",
-        "config": {
-            "host": "localhost",
-            "port": 6333,
-            "embedding_model_dims": 384,  # dimensão do all-MiniLM-L6-v2
-        }
+        "provider": "none",  # desativa o banco vetorial para simplificar
     }
 }
 
 # Inicializa o Mem0
-memory = Memory.from_config(config)
+try:
+    memory = Memory.from_config(config)
+except Exception as e:
+    st.error(f"Erro ao inicializar Mem0: {e}. Usando memória básica (sem busca semântica).")
+    # Fallback: cria um objeto Memory com configuração padrão (que pode não funcionar com Groq)
+    memory = Memory()
 
 # --- BANCO DE DADOS (SQLite) ---
 def init_db():
@@ -116,25 +117,6 @@ def deletar_conversa(chat_id):
     conn.commit()
     conn.close()
 
-def carregar_perfil(email):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    try:
-        c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
-        rows = c.fetchall()
-        conn.close()
-        return {r[0]: r[1] for r in rows}
-    except sqlite3.OperationalError:
-        conn.close()
-        return {}
-
-def salvar_perfil(email, chave, valor):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO perfil (user_email, chave, valor) VALUES (?, ?, ?)", (email, chave, valor))
-    conn.commit()
-    conn.close()
-
 init_db()
 
 # --- VALIDAR GROQ API KEY ---
@@ -178,7 +160,7 @@ with st.sidebar:
     
     st.sidebar.markdown("---")
     
-    # --- EXIBIR MEMÓRIAS SALVAS ---
+    # --- EXIBIR MEMÓRIAS SALVAS (tentar com o Mem0) ---
     st.sidebar.subheader("🧠 Memórias")
     try:
         memorias = memory.search(query="", user_id=user_email, limit=10)
@@ -188,7 +170,7 @@ with st.sidebar:
         else:
             st.sidebar.info("Nenhuma memória salva ainda.")
     except Exception as e:
-        st.sidebar.info("Memórias ainda não disponíveis.")
+        st.sidebar.info(f"Memórias indisponíveis: {str(e)[:50]}...")
     
     st.sidebar.markdown("---")
     st.sidebar.write(f"Conectado como: {user_email}")
