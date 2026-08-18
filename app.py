@@ -104,7 +104,7 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 file_content_context = ""
-MAX_CHARACTERS = 12000 # Limite defensivo para não estourar a cota de tokens (TPM)
+MAX_CHARACTERS = 12000
 
 if uploaded_file is not None:
     try:
@@ -167,7 +167,6 @@ Perfil retido do usuário:
 {texto_perfil}"""
 
     messages_payload = [{"role": "system", "content": system_prompt}]
-    # Limita o histórico das últimas 4 mensagens para economizar tokens
     for m in st.session_state.messages[-4:]:
         messages_payload.append({"role": m["role"], "content": m["content"]})
     
@@ -176,8 +175,10 @@ Perfil retido do usuário:
     with st.chat_message("assistant"):
         try:
             client = Groq(api_key=str(api_key).strip())
+            
+            # Chama o modelo llama3-70b-8192
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama3-70b-8192",
                 messages=messages_payload
             )
             bot_reply = response.choices[0].message.content
