@@ -5,31 +5,26 @@ from duckduckgo_search import DDGS
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖")
 
-# --- AUTENTICAÇÃO COM GOOGLE ---
-if not st.experimental_user.is_logged_in:
+# --- AUTENTICAÇÃO OFICIAL COM GOOGLE ---
+if not st.user.is_logged_in:
     st.title("🤖 Agente Coder")
-    st.write("Faça login com sua conta do Google para acessar o sistema.")
+    st.write("Faça login com sua conta do Google para acessar a aplicação.")
     if st.button("🔑 Entrar com o Google"):
         st.login("google")
     st.stop()
 
-# Recupera o email retornado pela conta Google
-user_email = st.experimental_user.email
+# Recupera o e-mail retornado pela conta do Google
+user_email = st.user.email
 st.title(f"🤖 Olá, {user_email}!")
 
-# --- BANCO DE DADOS (SQLite com tratamento de esquema) ---
+# --- BANCO DE DADOS (SQLite com isolamento por e-mail) ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    
-    # Recria/ajusta tabela de historico
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, role TEXT, content TEXT)''')
-    
-    # Recria/ajusta tabela de perfil
     c.execute('''CREATE TABLE IF NOT EXISTS perfil 
                  (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))''')
-    
     conn.commit()
     conn.close()
 
@@ -115,7 +110,7 @@ if user_input := st.chat_input("Digite sua dúvida de programação..."):
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Busca Web
+    # Busca Web Automática
     extra_context = ""
     try:
         with DDGS() as ddgs:
