@@ -5,6 +5,9 @@ from duckduckgo_search import DDGS
 import pypdf
 import uuid
 import re
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import json
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖", layout="wide")
 
@@ -18,17 +21,31 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
+# --- CARREGAR MODELO DE EMBEDDING (LOCAL) ---
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+embedder = load_embedder()
+
 # --- BANCO DE DADOS COM MEMÓRIA ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
+    
+    # Conversas
     c.execute('''CREATE TABLE IF NOT EXISTS conversas 
                  (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
                   criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Histórico
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
+    
+    # Memórias (com embedding armazenado como JSON)
     c.execute('''CREATE TABLE IF NOT EXISTS memorias 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, fato TEXT, criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, fato TEXT, embedding TEXT, criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
     conn.commit()
     conn.close()
 
@@ -82,68 +99,105 @@ def deletar_conversa(chat_id):
 
 # --- FUNÇÕES DE MEMÓRIA ---
 def salvar_memoria(email, fato):
-    if not fato or len(fato) < 3:
+    """Salva um fato na memória com embedding."""
+    if not fato or len(fato) < 5:
         return
+    embedding = embedder.encode(fato).tolist()
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("INSERT INTO memorias (user_email, fato) VALUES (?, ?)", (email, fato))
+    c.execute("INSERT INTO memorias (user_email, fato, embedding) VALUES (?, ?, ?)", 
+              (email, fato, json.dumps(embedding)))
     conn.commit()
     conn.close()
 
 def buscar_memorias(email, query, limit=3):
+    """Busca memórias relevantes usando similaridade de cosseno."""
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    # Busca simples por palavras-chave (para teste)
-    palavras = query.lower().split()
-    if not palavras:
-        return []
-    condicoes = " OR ".join(["fato LIKE ?" for _ in palavras])
-    params = [f"%{p}%" for p in palavras]
-    c.execute(f"SELECT fato FROM memorias WHERE user_email = ? AND ({condicoes}) ORDER BY criado_em DESC LIMIT ?", (email, *params, limit))
+    c.execute("SELECT id, fato, embedding FROM memorias WHERE user_email = ? ORDER BY criado_em DESC", (email,))
     rows = c.fetchall()
     conn.close()
-    return [r[0] for r in rows]
+    
+    if not rows:
+        return []
+    
+    query_embedding = embedder.encode(query)
+    resultados = []
+    for id, fato, emb_json in rows:
+        emb = np.array(json.loads(emb_json))
+        sim = np.dot(query_embedding, emb) / (np.linalg.norm(query_embedding) * np.linalg.norm(emb) + 1e-8)
+        resultados.append((sim, fato))
+    
+    resultados.sort(key=lambda x: x[0], reverse=True)
+    return [fato for _, fato in resultados[:limit]]
 
-# --- EXTRAÇÃO DE MEMÓRIAS COM REGEX (SEM LLM) ---
-def extrair_memorias_manual(texto, email):
-    """Extrai informações com regex e salva diretamente."""
-    salvou = False
-    # Nome
-    match = re.search(r"(?:meu nome é|eu sou|chamo-me|me chamo|sou o|sou a)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)", texto, re.IGNORECASE)
-    if match:
-        nome = match.group(1).strip()
-        if len(nome) > 2:
-            salvar_memoria(email, f"nome: {nome}")
-            st.toast(f"🧠 Memória salva: nome -> {nome}", icon="✅")
-            salvou = True
-    # Cidade
-    match = re.search(r"(?:moro em|sou de|resido em)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)", texto, re.IGNORECASE)
-    if match:
-        cidade = match.group(1).strip()
-        if len(cidade) > 2:
-            salvar_memoria(email, f"cidade: {cidade}")
-            st.toast(f"🧠 Memória salva: cidade -> {cidade}", icon="✅")
-            salvou = True
-    # Outros interesses (gosta de X)
-    match = re.search(r"(?:gosto|adoro|amo|curto)\s+(?:de\s+)?([A-Za-zÀ-ÖØ-öø-ÿ\s]{3,})", texto, re.IGNORECASE)
-    if match:
-        interesse = match.group(1).strip()
-        if len(interesse) > 2:
-            salvar_memoria(email, f"interesse: {interesse}")
-            st.toast(f"🧠 Memória salva: interesse -> {interesse}", icon="✅")
-            salvou = True
-    return salvou
+# --- EXTRAÇÃO DE MEMÓRIAS USANDO GROQ ---
+def extrair_memorias_automatico(texto, email, api_key):
+    """Usa o Groq para extrair fatos da mensagem do usuário."""
+    # Lista de modelos gratuitos para extração (fallback)
+    modelos_extracao = [
+        "openai/gpt-oss-20b",
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it"
+    ]
+    
+    prompt = f"""
+    Analise a mensagem do usuário abaixo e extraia fatos importantes sobre ele (nome, interesses, profissão, projetos, habilidades, etc.).
+    Retorne APENAS uma lista de fatos, um por linha, sem numeração ou formatação extra.
+    Se não houver fatos relevantes, retorne a palavra "NENHUM".
+    
+    Mensagem: "{texto}"
+    """
+    
+    for model in modelos_extracao:
+        try:
+            client = Groq(api_key=str(api_key).strip())
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": "Você é um assistente especializado em extrair fatos de conversas."},
+                          {"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=200,
+            )
+            resultado = response.choices[0].message.content.strip()
+            if resultado and resultado != "NENHUM":
+                for linha in resultado.split('\n'):
+                    fato = linha.strip()
+                    if fato and len(fato) > 5:
+                        salvar_memoria(email, fato)
+                        st.toast(f"🧠 Memória salva: {fato[:50]}...", icon="✅")
+                return  # Sai após o primeiro sucesso
+        except Exception:
+            continue  # Tenta o próximo modelo
 
 init_db()
 
 # --- VALIDAR GROQ API KEY ---
 api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
-    st.error("GROQ_API_KEY não configurada nos Secrets.")
+    st.error("❌ GROQ_API_KEY não configurada nos Secrets do Streamlit.")
+    st.info("Por favor, configure sua chave de API da Groq em: Settings → Secrets → GROQ_API_KEY = 'sua_chave_aqui'")
     st.stop()
 
-# --- MODELO PRINCIPAL ---
-active_model = "openai/gpt-oss-120b"  # ou "llama-3.1-8b-instant"
+# Testar a chave de API com uma chamada simples
+try:
+    test_client = Groq(api_key=str(api_key).strip())
+    test_client.models.list()  # Verifica se a chave é válida
+except Exception as e:
+    st.error(f"❌ Erro na chave de API da Groq: {e}")
+    st.info("Verifique se a chave está correta e ativa no console da Groq.")
+    st.stop()
+
+# --- MODELO PRINCIPAL (com fallback) ---
+modelos_principais = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.1-8b-instant",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it"
+]
+active_model = modelos_principais[0]  # Será substituído pelo primeiro que funcionar
 
 # --- GERENCIAMENTO DE SESSÃO ---
 if "active_chat_id" not in st.session_state:
@@ -189,7 +243,7 @@ with st.sidebar:
         st.sidebar.info("Nenhuma memória salva ainda.")
     
     st.sidebar.markdown("---")
-    st.sidebar.write(f"Conectado como: {user_email}")
+    st.sidebar.write(f"🔑 Conectado como: {user_email}")
     if st.sidebar.button("🚪 Sair"):
         st.logout()
 
@@ -214,38 +268,44 @@ if chat_prompt:
     with st.chat_message("user"):
         st.markdown(chat_prompt)
     
-    # --- EXTRAIR E SALVAR MEMÓRIAS (MANUALMENTE) ---
-    extrair_memorias_manual(chat_prompt, user_email)
+    # Extrair memórias automaticamente (usa Groq)
+    extrair_memorias_automatico(chat_prompt, user_email, api_key)
     
     # Buscar memórias relevantes para a pergunta
     memorias_relevantes = buscar_memorias(user_email, chat_prompt, limit=3)
     texto_memorias = "\n".join([f"- {mem}" for mem in memorias_relevantes]) if memorias_relevantes else "Nenhuma memória relevante encontrada."
     
-    # Gerar resposta
+    # Gerar resposta (tenta cada modelo até um funcionar)
     with st.chat_message("assistant"):
         with st.spinner("Pensando..."):
-            try:
-                client = Groq(api_key=str(api_key).strip())
-                
-                system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq.
-                
-                MEMÓRIAS SOBRE O USUÁRIO (extraídas automaticamente):
-                {texto_memorias}
-                
-                Use essas memórias para personalizar suas respostas. Seja natural e direto."""
-                
-                historico = carregar_historico_chat(st.session_state.active_chat_id)
-                messages_api = [{"role": "system", "content": system_prompt}] + historico
-                
-                chat_completion = client.chat.completions.create(
-                    model=active_model,
-                    messages=messages_api
-                )
-                bot_reply = chat_completion.choices[0].message.content
-                st.markdown(bot_reply)
-                
-                # Salvar resposta
-                salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
-                
-            except Exception as err:
-                st.error(f"⚠️ Erro: {err}")
+            resposta_gerada = False
+            for model in modelos_principais:
+                try:
+                    client = Groq(api_key=str(api_key).strip())
+                    
+                    system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo da Groq.
+                    
+                    MEMÓRIAS SOBRE O USUÁRIO (extraídas automaticamente):
+                    {texto_memorias}
+                    
+                    Use essas memórias para personalizar suas respostas. Seja natural e direto."""
+                    
+                    historico = carregar_historico_chat(st.session_state.active_chat_id)
+                    messages_api = [{"role": "system", "content": system_prompt}] + historico
+                    
+                    chat_completion = client.chat.completions.create(
+                        model=model,
+                        messages=messages_api
+                    )
+                    bot_reply = chat_completion.choices[0].message.content
+                    st.markdown(bot_reply)
+                    
+                    # Salvar resposta
+                    salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
+                    resposta_gerada = True
+                    break  # Sai do loop se funcionou
+                except Exception as err:
+                    continue  # Tenta o próximo modelo
+            
+            if not resposta_gerada:
+                st.error("⚠️ Nenhum modelo disponível funcionou. Verifique sua chave de API ou tente novamente mais tarde.")
