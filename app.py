@@ -4,8 +4,12 @@ from groq import Groq
 from duckduckgo_search import DDGS
 import pypdf
 import uuid
-import json
-from datetime import datetime
+from mem0 import Memory
+import os
+
+# --- CONFIGURA OLLAMA PARA EMBEDDINGS ---
+# O Mem0 vai usar o Ollama para gerar embeddings localmente
+os.environ["OLLAMA_API_URL"] = "http://localhost:11434"  # URL padrão do Ollama
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖", layout="wide")
 
@@ -19,7 +23,29 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
-# --- BANCO DE DADOS ---
+# --- CONFIGURAÇÃO DO MEM0 COM GROQ E OLLAMA ---
+config = {
+    "llm": {
+        "provider": "groq",
+        "config": {
+            "model": "llama-3.3-70b-versatile",  # Modelo que você já usa
+            "temperature": 0.1,
+            "max_tokens": 2000,
+        }
+    },
+    "embedder": {
+        "provider": "ollama",
+        "config": {
+            "model": "nomic-embed-text",  # Modelo de embedding local
+            "ollama_base_url": "http://localhost:11434",
+        }
+    }
+}
+
+# Inicializa o Mem0 com a configuração
+memory = Memory.from_config(config)
+
+# --- BANCO DE DADOS (SQLite) ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
@@ -28,40 +54,22 @@ def init_db():
                  (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
                   criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    c.execute("PRAGMA table_info(conversas)")
-    colunas = [col[1] for col in c.fetchall()]
-    if "fixado" not in colunas:
-        c.execute("ALTER TABLE conversas ADD COLUMN fixado INTEGER DEFAULT 0")
-    
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
     
     try:
-        c.execute("SELECT user_email, categoria, chave, valor FROM perfil LIMIT 1")
+        c.execute("SELECT user_email, chave, valor FROM perfil LIMIT 1")
     except sqlite3.OperationalError:
         c.execute("DROP TABLE IF EXISTS perfil")
-        c.execute('''CREATE TABLE perfil (
-            user_email TEXT,
-            categoria TEXT,
-            chave TEXT,
-            valor TEXT,
-            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (user_email, categoria, chave)
-        )''')
+        c.execute("CREATE TABLE perfil (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))")
+    
     conn.commit()
     conn.close()
 
-# --- FUNÇÕES DE CONVERSA ---
-def listar_conversas(email, filtro=None):
+def listar_conversas(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    query = "SELECT chat_id, titulo, fixado FROM conversas WHERE user_email = ?"
-    params = [email]
-    if filtro and filtro.strip():
-        query += " AND titulo LIKE ?"
-        params.append(f"%{filtro}%")
-    query += " ORDER BY fixado DESC, criado_em DESC"
-    c.execute(query, params)
+    c.execute("SELECT chat_id, titulo FROM conversas WHERE user_email = ? ORDER BY criado_em DESC", (email,))
     rows = c.fetchall()
     conn.close()
     return rows
@@ -70,7 +78,7 @@ def criar_nova_conversa(email, titulo="Nova Conversa"):
     chat_id = str(uuid.uuid4())
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("INSERT INTO conversas (chat_id, user_email, titulo, fixado) VALUES (?, ?, ?, 0)", (chat_id, email, titulo))
+    c.execute("INSERT INTO conversas (chat_id, user_email, titulo) VALUES (?, ?, ?)", (chat_id, email, titulo))
     conn.commit()
     conn.close()
     return chat_id
@@ -80,21 +88,6 @@ def atualizar_titulo_conversa(chat_id, texto):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     c.execute("UPDATE conversas SET titulo = ? WHERE chat_id = ? AND titulo = 'Nova Conversa'", (titulo, chat_id))
-    conn.commit()
-    conn.close()
-
-def alternar_fixado(chat_id):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("UPDATE conversas SET fixado = NOT fixado WHERE chat_id = ?", (chat_id,))
-    conn.commit()
-    conn.close()
-
-def deletar_conversa(chat_id):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("DELETE FROM conversas WHERE chat_id = ?", (chat_id,))
-    c.execute("DELETE FROM historico WHERE chat_id = ?", (chat_id,))
     conn.commit()
     conn.close()
 
@@ -113,50 +106,11 @@ def carregar_historico_chat(chat_id):
     conn.close()
     return [{"role": r[0], "content": r[1]} for r in rows]
 
-# --- FUNÇÕES DE PERFIL ---
-def carregar_perfil(email):
+def deletar_conversa(chat_id):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    try:
-        c.execute("SELECT categoria, chave, valor FROM perfil WHERE user_email = ?", (email,))
-        rows = c.fetchall()
-        conn.close()
-        perfil = {}
-        for categoria, chave, valor in rows:
-            if categoria not in perfil:
-                perfil[categoria] = {}
-            perfil[categoria][chave] = valor
-        return perfil
-    except sqlite3.OperationalError:
-        conn.close()
-        return {}
-
-def salvar_perfil(email, categoria, chave, valor):
-    if not chave or not valor or len(valor) < 2:
-        return False
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    # Garante chave única dentro da categoria
-    perfil_existente = carregar_perfil(email)
-    if categoria in perfil_existente and chave in perfil_existente[categoria]:
-        contador = 1
-        nova_chave = f"{chave}_{contador}"
-        while categoria in perfil_existente and nova_chave in perfil_existente[categoria]:
-            contador += 1
-            nova_chave = f"{chave}_{contador}"
-        chave = nova_chave
-    c.execute(
-        "INSERT OR REPLACE INTO perfil (user_email, categoria, chave, valor, atualizado_em) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-        (email, categoria.strip(), chave.strip(), valor.strip())
-    )
-    conn.commit()
-    conn.close()
-    return True
-
-def deletar_memoria(email, categoria, chave):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("DELETE FROM perfil WHERE user_email = ? AND categoria = ? AND chave = ?", (email, categoria, chave))
+    c.execute("DELETE FROM conversas WHERE chat_id = ?", (chat_id,))
+    c.execute("DELETE FROM historico WHERE chat_id = ?", (chat_id,))
     conn.commit()
     conn.close()
 
@@ -168,7 +122,7 @@ if not api_key:
     st.error("GROQ_API_KEY não configurada nos Secrets.")
     st.stop()
 
-# --- MODELO PARA CHAT ---
+# --- MODELOS ---
 preferenciais = [
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
@@ -176,358 +130,127 @@ preferenciais = [
     "llama3-8b-8192",
     "gemma2-9b-it"
 ]
-active_model = preferenciais[0]
+active_model = preferenciais[0]  # Pode manter o que funciona melhor
 
 # --- GERENCIAMENTO DE SESSÃO ---
 if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = None
 
-if "pagina" not in st.session_state:
-    st.session_state.pagina = "Chat"
-
-# ========================================
-# AGENTE EXTRATOR (salva memórias)
-# ========================================
-def agente_extrator(user_msg, historico, email):
-    """
-    Analisa a mensagem do usuário e o histórico recente,
-    extrai informações relevantes e salva no perfil.
-    Retorna True se salvou algo.
-    """
-    if not user_msg or len(user_msg) < 3:
-        return False
-    
-    # Pega as últimas 5 mensagens para contexto
-    contexto = historico[-5:] if len(historico) >= 5 else historico
-    dialogo = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in contexto])
-    
-    categorias = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
-    
-    prompt = f"""
-    Você é um assistente especializado em extrair e organizar memórias sobre o usuário a partir de conversas.
-    
-    Analise a mensagem mais recente do usuário e o contexto da conversa.
-    Identifique informações relevantes sobre o usuário, como:
-    - Nome, idade, cidade, estado civil, filhos, etc. (categoria "Você")
-    - Hobbies, paixões, coisas que gosta (categoria "Interesses")
-    - Tópicos de interesse (categoria "Tópicos")
-    - Projetos recentes, trabalho (categoria "Recent Work")
-    - Habilidades técnicas (categoria "Skills")
-    - Estudos, cursos (categoria "Study")
-    - Preferências de estilo de escrita (categoria "Writing Style")
-    - Áreas de atuação (categoria "Áreas")
-    
-    **IMPORTANTE:**
-    - Se o usuário mencionar algo que já está nas memórias, NÃO salve duplicado.
-    - Use chaves descritivas únicas (ex: "nome", "cidade", "interesse_animais", "filho_jose").
-    - Retorne APENAS um objeto JSON com a estrutura:
-    {{
-        "memorias": [
-            {{"categoria": "categoria", "chave": "chave_unica", "valor": "valor"}}
-        ]
-    }}
-    Se não houver nenhuma informação nova, retorne {{"memorias": []}}.
-    
-    DIÁLOGO:
-    {dialogo}
-    """
-    try:
-        client = Groq(api_key=str(api_key).strip())
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {"role": "system", "content": "Você é um assistente especializado em extrair informações de conversas."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"}
-        )
-        resultado = response.choices[0].message.content
-        dados = json.loads(resultado)
-        salvou = False
-        for mem in dados.get("memorias", []):
-            categoria = mem.get("categoria", "Você")
-            chave = mem.get("chave", "").strip()
-            valor = mem.get("valor", "").strip()
-            if chave and valor and categoria in categorias:
-                if salvar_perfil(email, categoria, chave, valor):
-                    salvou = True
-                    st.toast(f"🧠 Memória salva: {chave} -> {valor}", icon="✅")
-        return salvou
-    except Exception as e:
-        return False
-
-# ========================================
-# AGENTE DECISOR (escolhe a melhor ação)
-# ========================================
-def agente_decisor(user_msg, historico, perfil):
-    """
-    Com base na mensagem do usuário, histórico e memórias,
-    decide qual é a melhor abordagem para a resposta.
-    Retorna um dicionário com instruções para o agente principal.
-    """
-    # Carrega memórias para contexto
-    texto_perfil = ""
-    for categoria, itens in perfil.items():
-        texto_perfil += f"\n--- {categoria} ---\n"
-        for chave, valor in itens.items():
-            texto_perfil += f"{chave}: {valor}\n"
-    
-    # Pega as últimas 5 mensagens
-    contexto = historico[-5:] if len(historico) >= 5 else historico
-    dialogo = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in contexto])
-    
-    prompt = f"""
-    Você é um assistente que decide como o agente principal deve responder ao usuário.
-    
-    Com base na mensagem do usuário, no histórico da conversa e nas memórias disponíveis,
-    determine qual é a MELHOR AÇÃO a tomar.
-    
-    MEMÓRIAS DO USUÁRIO:
-    {texto_perfil if texto_perfil else "Nenhuma memória ainda."}
-    
-    DIÁLOGO RECENTE:
-    {dialogo}
-    
-    Agora, analise e retorne um JSON com as seguintes instruções:
-    {{
-        "tom": "amigável|formal|divertido|informativo",
-        "prioridade": "responder|perguntar|sugerir|esclarecer",
-        "tema": "qual o tema principal da resposta (ex: aviação, programação, elefantes, etc.)",
-        "instrucao_extra": "qualquer instrução adicional sobre como responder"
-    }}
-    
-    **REGRAS:**
-    - Se o usuário compartilhou informação pessoal nova (nome, filho, interesse), priorize "perguntar" ou "responder" com reconhecimento.
-    - Se o usuário fez uma afirmação vaga (ex: "Animais são legais"), priorize "perguntar" (ex: "Que animais você gosta?").
-    - Se o usuário está claramente engajado em um tópico (ex: aviação), priorize "responder" sobre esse tópico.
-    - Se o usuário fez uma piada ou referência, priorize "responder" com tom divertido.
-    - Use as memórias para personalizar a resposta (ex: se sabe o nome, use-o).
-    """
-    try:
-        client = Groq(api_key=str(api_key).strip())
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {"role": "system", "content": "Você é um assistente especializado em decidir a melhor ação para uma conversa."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"}
-        )
-        resultado = response.choices[0].message.content
-        return json.loads(resultado)
-    except Exception as e:
-        # Fallback: resposta padrão
-        return {
-            "tom": "amigável",
-            "prioridade": "responder",
-            "tema": "conversa geral",
-            "instrucao_extra": "Seja natural e pergunte se precisa de mais ajuda."
-        }
-
-# --- SIDEBAR (ESTILO CLAUDE) ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.title("📋 Claude")
-    
-    busca = st.text_input("🔍 Buscar conversas", placeholder="Digite para filtrar...", key="search_input")
+    st.title("📋 Conversas")
     
     if st.button("➕ Nova Conversa", use_container_width=True):
         novo_id = criar_nova_conversa(user_email)
         st.session_state.active_chat_id = novo_id
-        st.session_state.pagina = "Chat"
         st.rerun()
     
     st.markdown("---")
     
-    conversas = listar_conversas(user_email, busca if busca else None)
-    
+    conversas = listar_conversas(user_email)
     if not conversas:
         st.info("Nenhuma conversa encontrada.")
     else:
-        fixadas = [c for c in conversas if c[2] == 1]
-        nao_fixadas = [c for c in conversas if c[2] == 0]
-        
-        if fixadas:
-            st.subheader("📌 Fixadas")
-            for chat_id, titulo, fixado in fixadas:
-                col1, col2, col3 = st.columns([0.6, 0.2, 0.2])
-                with col1:
-                    if st.button(f"{titulo}", key=f"chat_{chat_id}", use_container_width=True):
-                        st.session_state.active_chat_id = chat_id
-                        st.session_state.pagina = "Chat"
-                        st.rerun()
-                with col2:
-                    if st.button("📌", key=f"pin_{chat_id}", help="Desfixar"):
-                        alternar_fixado(chat_id)
-                        st.rerun()
-                with col3:
-                    if st.button("🗑️", key=f"del_{chat_id}", help="Deletar"):
-                        deletar_conversa(chat_id)
-                        if st.session_state.active_chat_id == chat_id:
-                            st.session_state.active_chat_id = None
-                        st.rerun()
-        
-        if nao_fixadas:
-            st.subheader("📂 Conversas")
-            for chat_id, titulo, fixado in nao_fixadas:
-                col1, col2, col3 = st.columns([0.6, 0.2, 0.2])
-                with col1:
-                    if st.button(f"{titulo}", key=f"chat_{chat_id}", use_container_width=True):
-                        st.session_state.active_chat_id = chat_id
-                        st.session_state.pagina = "Chat"
-                        st.rerun()
-                with col2:
-                    if st.button("📍", key=f"pin_{chat_id}", help="Fixar"):
-                        alternar_fixado(chat_id)
-                        st.rerun()
-                with col3:
-                    if st.button("🗑️", key=f"del_{chat_id}", help="Deletar"):
-                        deletar_conversa(chat_id)
-                        if st.session_state.active_chat_id == chat_id:
-                            st.session_state.active_chat_id = None
-                        st.rerun()
+        for chat_id, titulo in conversas:
+            col1, col2 = st.columns([0.8, 0.2])
+            with col1:
+                if st.button(f"{titulo}", key=f"chat_{chat_id}", use_container_width=True):
+                    st.session_state.active_chat_id = chat_id
+                    st.rerun()
+            with col2:
+                if st.button("🗑️", key=f"del_{chat_id}"):
+                    deletar_conversa(chat_id)
+                    st.rerun()
     
     st.sidebar.markdown("---")
+    
+    # --- EXIBIR MEMÓRIAS SALVAS ---
+    st.sidebar.subheader("🧠 Memórias")
+    try:
+        memorias = memory.search(query="", user_id=user_email, limit=10)
+        if memorias and "results" in memorias and memorias["results"]:
+            for mem in memorias["results"]:
+                st.sidebar.write(f"- {mem['memory']}")
+        else:
+            st.sidebar.info("Nenhuma memória salva ainda.")
+    except Exception as e:
+        st.sidebar.info("Memórias ainda não disponíveis.")
+
     if st.sidebar.button("🚪 Sair"):
         st.logout()
 
 # --- ÁREA PRINCIPAL ---
-if st.session_state.pagina == "Chat":
-    col_title, col_menu = st.columns([0.85, 0.15])
-    with col_title:
-        st.title("🤖 Agente Coder")
-    with col_menu:
-        if st.button("⋮", help="Configurações de memória"):
-            st.session_state.pagina = "Memoria"
-            st.rerun()
-    
-    if not st.session_state.active_chat_id:
-        st.session_state.active_chat_id = criar_nova_conversa(user_email)
-        st.rerun()
-    
-    messages = carregar_historico_chat(st.session_state.active_chat_id)
-    for msg in messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-    
-    chat_prompt = st.chat_input("Digite sua mensagem...")
-    
-    if chat_prompt:
-        salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
-        atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
-        
-        with st.chat_message("user"):
-            st.markdown(chat_prompt)
-        
-        with st.chat_message("assistant"):
-            with st.spinner("🧠 Processando..."):
-                try:
-                    client = Groq(api_key=str(api_key).strip())
-                    
-                    # 1. AGENTE EXTRATOR: Salva memórias
-                    with st.spinner("📝 Extraindo memórias..."):
-                        salvou = agente_extrator(chat_prompt, messages, user_email)
-                        if salvou:
-                            st.toast("🧠 Memórias atualizadas!", icon="✅")
-                    
-                    # 2. RECARREGA PERFIL ATUALIZADO
-                    perfil = carregar_perfil(user_email)
-                    
-                    # 3. AGENTE DECISOR: Decide a melhor ação
-                    with st.spinner("🤔 Analisando contexto..."):
-                        decisao = agente_decisor(chat_prompt, messages, perfil)
-                    
-                    # 4. MONTA SYSTEM PROMPT COM AS INSTRUÇÕES DO DECISOR
-                    texto_perfil = ""
-                    for categoria, itens in perfil.items():
-                        texto_perfil += f"\n--- {categoria} ---\n"
-                        for chave, valor in itens.items():
-                            texto_perfil += f"{chave}: {valor}\n"
-                    
-                    system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq.
-                    
-                    MEMÓRIAS DO USUÁRIO:
-                    {texto_perfil if texto_perfil else "Nenhuma memória registrada ainda."}
-                    
-                    INSTRUÇÕES PARA ESTA RESPOSTA:
-                    - Tom: {decisao.get('tom', 'amigável')}
-                    - Prioridade: {decisao.get('prioridade', 'responder')}
-                    - Tema: {decisao.get('tema', 'conversa geral')}
-                    - Instrução extra: {decisao.get('instrucao_extra', 'Seja natural e útil.')}
-                    
-                    **IMPORTANTE:**
-                    - Se o usuário perguntar qual é o seu modelo, diga que é baseado no {active_model} da Groq.
-                    - Use as memórias para personalizar a resposta (ex: chame pelo nome se souber).
-                    - Se a prioridade for "perguntar", faça uma pergunta relevante sobre o tema.
-                    - Se for "responder", forneça uma resposta direta e útil.
-                    - Se for "sugerir", ofereça sugestões relacionadas ao tema.
-                    - Se for "esclarecer", peça mais informações.
-                    - Seja conciso e evite respostas muito longas desnecessárias."""
-                    
-                    historico = carregar_historico_chat(st.session_state.active_chat_id)
-                    messages_api = [{"role": "system", "content": system_prompt}] + historico
-                    
-                    chat_completion = client.chat.completions.create(
-                        model=active_model,
-                        messages=messages_api
-                    )
-                    bot_reply = chat_completion.choices[0].message.content
-                    st.markdown(bot_reply)
-                    
-                    salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
-                    
-                except Exception as err:
-                    st.error(f"⚠️ Erro: {err}")
+if not st.session_state.active_chat_id:
+    st.session_state.active_chat_id = criar_nova_conversa(user_email)
 
-else:
-    # --- PÁGINA DE MEMÓRIA ---
-    col_back, col_title = st.columns([0.15, 0.85])
-    with col_back:
-        if st.button("← Voltar", use_container_width=True):
-            st.session_state.pagina = "Chat"
-            st.rerun()
-    with col_title:
-        st.title("🧠 Memória")
+st.title("🤖 Agente Coder")
+
+messages = carregar_historico_chat(st.session_state.active_chat_id)
+for msg in messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+chat_prompt = st.chat_input("Digite sua mensagem...")
+
+if chat_prompt:
+    # 1. Salva a mensagem do usuário
+    salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
+    atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
     
-    st.caption("Gerencie as memórias que o agente tem sobre você. Ele as extrai automaticamente das conversas.")
+    with st.chat_message("user"):
+        st.markdown(chat_prompt)
     
-    perfil = carregar_perfil(user_email)
+    # 2. Busca memórias relevantes no Mem0
+    try:
+        memorias_relevantes = memory.search(
+            query=chat_prompt,
+            user_id=user_email,
+            limit=3
+        )
+        texto_memorias = ""
+        if memorias_relevantes and "results" in memorias_relevantes:
+            for mem in memorias_relevantes["results"]:
+                texto_memorias += f"- {mem['memory']}\n"
+    except Exception as e:
+        texto_memorias = "[Erro ao buscar memórias]"
     
-    if not perfil:
-        st.info("Nenhuma memória salva ainda. Converse com o agente e ele aprenderá sobre você.")
-    
-    categorias_ordenadas = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
-    
-    for categoria in categorias_ordenadas:
-        if categoria in perfil and perfil[categoria]:
-            with st.expander(f"📂 {categoria}", expanded=True):
-                for chave, valor in perfil[categoria].items():
-                    col1, col2, col3 = st.columns([0.3, 0.5, 0.2])
-                    col1.write(f"**{chave}**")
-                    col2.write(valor)
-                    if col3.button("🗑️", key=f"del_{categoria}_{chave}"):
-                        deletar_memoria(user_email, categoria, chave)
-                        st.rerun()
-    
-    st.subheader("➕ Adicionar memória manualmente")
-    with st.form("add_memory_form"):
-        cols = st.columns(3)
-        with cols[0]:
-            nova_categoria = st.selectbox("Categoria", categorias_ordenadas)
-        with cols[1]:
-            nova_chave = st.text_input("Chave (ex: nome)")
-        with cols[2]:
-            novo_valor = st.text_input("Valor")
-        submitted = st.form_submit_button("Salvar memória")
-        if submitted and nova_chave and novo_valor:
-            salvar_perfil(user_email, nova_categoria, nova_chave, novo_valor)
-            st.rerun()
-    
-    if st.button("🗑️ Apagar todas as memórias", type="primary"):
-        conn = sqlite3.connect("memoria_agente.db")
-        c = conn.cursor()
-        c.execute("DELETE FROM perfil WHERE user_email = ?", (user_email,))
-        conn.commit()
-        conn.close()
-        st.rerun()
+    # 3. Gera a resposta do assistente
+    with st.chat_message("assistant"):
+        with st.spinner("Pensando..."):
+            try:
+                client = Groq(api_key=str(api_key).strip())
+                
+                system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq.
+                
+                MEMÓRIAS SOBRE O USUÁRIO:
+                {texto_memorias if texto_memorias else "Nenhuma memória registrada ainda."}
+                
+                Use essas memórias para personalizar suas respostas."""
+                
+                historico = carregar_historico_chat(st.session_state.active_chat_id)
+                messages_api = [{"role": "system", "content": system_prompt}] + historico
+                
+                chat_completion = client.chat.completions.create(
+                    model=active_model,
+                    messages=messages_api
+                )
+                bot_reply = chat_completion.choices[0].message.content
+                st.markdown(bot_reply)
+                
+                # 4. Salva a resposta
+                salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
+                
+                # 5. Salva a interação na memória do Mem0
+                try:
+                    memory.add(
+                        [
+                            {"role": "user", "content": chat_prompt},
+                            {"role": "assistant", "content": bot_reply}
+                        ],
+                        user_id=user_email
+                    )
+                except Exception as e:
+                    st.warning(f"⚠️ Erro ao salvar memória: {e}")
+                
+            except Exception as err:
+                st.error(f"⚠️ Erro: {err}")
