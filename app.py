@@ -25,8 +25,11 @@ def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     
+    # Tabela conversas com coluna fixado
     c.execute('''CREATE TABLE IF NOT EXISTS conversas 
-                 (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+                 (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
+                  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP, fixado INTEGER DEFAULT 0)''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
     
@@ -45,6 +48,68 @@ def init_db():
         )''')
     conn.commit()
     conn.close()
+
+# --- FUNÇÕES DE CONVERSA (com fixado) ---
+def listar_conversas(email, filtro=None):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    query = "SELECT chat_id, titulo, fixado FROM conversas WHERE user_email = ?"
+    params = [email]
+    if filtro:
+        query += " AND titulo LIKE ?"
+        params.append(f"%{filtro}%")
+    query += " ORDER BY fixado DESC, criado_em DESC"
+    c.execute(query, params)
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def criar_nova_conversa(email, titulo="Nova Conversa"):
+    chat_id = str(uuid.uuid4())
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO conversas (chat_id, user_email, titulo, fixado) VALUES (?, ?, ?, 0)", (chat_id, email, titulo))
+    conn.commit()
+    conn.close()
+    return chat_id
+
+def atualizar_titulo_conversa(chat_id, texto):
+    titulo = texto[:30] + "..." if len(texto) > 30 else texto
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("UPDATE conversas SET titulo = ? WHERE chat_id = ? AND titulo = 'Nova Conversa'", (titulo, chat_id))
+    conn.commit()
+    conn.close()
+
+def alternar_fixado(chat_id):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("UPDATE conversas SET fixado = NOT fixado WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def deletar_conversa(chat_id):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM conversas WHERE chat_id = ?", (chat_id,))
+    c.execute("DELETE FROM historico WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+def salvar_mensagem(chat_id, email, role, content):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO historico (chat_id, user_email, role, content) VALUES (?, ?, ?, ?)", (chat_id, email, role, content))
+    conn.commit()
+    conn.close()
+
+def carregar_historico_chat(chat_id):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("SELECT role, content FROM historico WHERE chat_id = ? ORDER BY id ASC", (chat_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [{"role": r[0], "content": r[1]} for r in rows]
 
 # --- FUNÇÕES DE PERFIL (com categoria) ---
 def carregar_perfil(email):
@@ -83,9 +148,6 @@ def deletar_memoria(email, categoria, chave):
 
 # --- EXTRAÇÃO AUTOMÁTICA COM LLM ---
 def extrair_memorias_llm(texto, email):
-    """
-    Usa o Groq para extrair fatos relevantes e categorizá-los automaticamente.
-    """
     api_key = st.secrets.get("GROQ_API_KEY")
     if not api_key:
         return
@@ -107,7 +169,7 @@ def extrair_memorias_llm(texto, email):
     try:
         client = Groq(api_key=str(api_key).strip())
         response = client.chat.completions.create(
-            model="llama3-8b-8192",  # modelo leve para extração
+            model="llama3-8b-8192",
             messages=[{"role": "system", "content": "Você é um assistente especializado em extrair informações."},
                       {"role": "user", "content": prompt}],
             temperature=0.3,
@@ -121,58 +183,8 @@ def extrair_memorias_llm(texto, email):
             valor = mem.get("valor", "").strip()
             if chave and valor and categoria in categorias_possiveis:
                 salvar_perfil(email, categoria, chave, valor)
-    except Exception as e:
-        # Silenciosamente falha na extração, não interrompe o chat
+    except Exception:
         pass
-
-# --- FUNÇÕES DE CONVERSA (mantidas) ---
-def listar_conversas(email):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("SELECT chat_id, titulo FROM conversas WHERE user_email = ? ORDER BY criado_em DESC", (email,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def criar_nova_conversa(email, titulo="Nova Conversa"):
-    chat_id = str(uuid.uuid4())
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO conversas (chat_id, user_email, titulo) VALUES (?, ?, ?)", (chat_id, email, titulo))
-    conn.commit()
-    conn.close()
-    return chat_id
-
-def atualizar_titulo_conversa(chat_id, texto):
-    titulo = texto[:30] + "..." if len(texto) > 30 else texto
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("UPDATE conversas SET titulo = ? WHERE chat_id = ? AND titulo = 'Nova Conversa'", (titulo, chat_id))
-    conn.commit()
-    conn.close()
-
-def salvar_mensagem(chat_id, email, role, content):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO historico (chat_id, user_email, role, content) VALUES (?, ?, ?, ?)", (chat_id, email, role, content))
-    conn.commit()
-    conn.close()
-
-def carregar_historico_chat(chat_id):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("SELECT role, content FROM historico WHERE chat_id = ? ORDER BY id ASC", (chat_id,))
-    rows = c.fetchall()
-    conn.close()
-    return [{"role": r[0], "content": r[1]} for r in rows]
-
-def deletar_conversa(chat_id):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("DELETE FROM conversas WHERE chat_id = ?", (chat_id,))
-    c.execute("DELETE FROM historico WHERE chat_id = ?", (chat_id,))
-    conn.commit()
-    conn.close()
 
 init_db()
 
@@ -193,71 +205,115 @@ preferenciais = [
 active_model = preferenciais[0]
 
 # --- GERENCIAMENTO DE SESSÃO DO CHAT ---
-conversas_usuario = listar_conversas(user_email)
-if "active_chat_id" not in st.session_state or not st.session_state.active_chat_id:
-    if conversas_usuario:
-        st.session_state.active_chat_id = conversas_usuario[0][0]
-    else:
-        st.session_state.active_chat_id = criar_nova_conversa(user_email)
+if "active_chat_id" not in st.session_state:
+    st.session_state.active_chat_id = None
 
-# --- CONTROLE DE PÁGINA (Chat vs Memória) ---
 if "pagina" not in st.session_state:
-    st.session_state.pagina = "Chat"
+    st.session_state.pagina = "Chat"  # "Chat" ou "Memoria"
 
-# --- BARRA LATERAL ---
-st.sidebar.title("📋 Navegação")
-if st.sidebar.button("💬 Chat", use_container_width=True):
-    st.session_state.pagina = "Chat"
-    st.rerun()
-if st.sidebar.button("🧠 Memória (Configurações)", use_container_width=True):
-    st.session_state.pagina = "Memoria"
-    st.rerun()
-
-st.sidebar.markdown("---")
-
-if st.session_state.pagina == "Chat":
-    # --- CHAT (layout original) ---
-    st.sidebar.subheader("💬 Conversas")
-    if st.sidebar.button("➕ Nova Conversa", use_container_width=True):
+# --- SIDEBAR (ESTILO CLAUDE) ---
+with st.sidebar:
+    st.title("📋 Claude")
+    
+    # Campo de busca
+    busca = st.text_input("🔍 Buscar conversas", placeholder="Digite para filtrar...")
+    
+    # Botão Nova Conversa
+    if st.button("➕ Nova Conversa", use_container_width=True):
         novo_id = criar_nova_conversa(user_email)
         st.session_state.active_chat_id = novo_id
         st.rerun()
-
-    for cid, titulo in conversas_usuario:
-        col1, col2 = st.sidebar.columns([0.8, 0.2])
-        label = f"📌 {titulo}" if cid == st.session_state.active_chat_id else titulo
-        if col1.button(label, key=f"chat_{cid}", use_container_width=True):
-            st.session_state.active_chat_id = cid
-            st.rerun()
-        if col2.button("🗑️", key=f"del_{cid}"):
-            deletar_conversa(cid)
-            st.rerun()
-
+    
+    st.markdown("---")
+    
+    # Listar conversas (com filtro)
+    conversas = listar_conversas(user_email, busca if busca else None)
+    
+    if not conversas:
+        st.info("Nenhuma conversa encontrada.")
+    else:
+        # Separar fixadas e não fixadas
+        fixadas = [c for c in conversas if c[2] == 1]
+        nao_fixadas = [c for c in conversas if c[2] == 0]
+        
+        if fixadas:
+            st.subheader("📌 Fixadas")
+            for chat_id, titulo, fixado in fixadas:
+                col1, col2, col3 = st.columns([0.6, 0.2, 0.2])
+                with col1:
+                    if st.button(f"{titulo}", key=f"chat_{chat_id}", use_container_width=True):
+                        st.session_state.active_chat_id = chat_id
+                        st.rerun()
+                with col2:
+                    if st.button("📌", key=f"pin_{chat_id}", help="Desfixar"):
+                        alternar_fixado(chat_id)
+                        st.rerun()
+                with col3:
+                    if st.button("🗑️", key=f"del_{chat_id}", help="Deletar"):
+                        deletar_conversa(chat_id)
+                        if st.session_state.active_chat_id == chat_id:
+                            st.session_state.active_chat_id = None
+                        st.rerun()
+        
+        if nao_fixadas:
+            st.subheader("📂 Conversas")
+            for chat_id, titulo, fixado in nao_fixadas:
+                col1, col2, col3 = st.columns([0.6, 0.2, 0.2])
+                with col1:
+                    if st.button(f"{titulo}", key=f"chat_{chat_id}", use_container_width=True):
+                        st.session_state.active_chat_id = chat_id
+                        st.rerun()
+                with col2:
+                    if st.button("📍", key=f"pin_{chat_id}", help="Fixar"):
+                        alternar_fixado(chat_id)
+                        st.rerun()
+                with col3:
+                    if st.button("🗑️", key=f"del_{chat_id}", help="Deletar"):
+                        deletar_conversa(chat_id)
+                        if st.session_state.active_chat_id == chat_id:
+                            st.session_state.active_chat_id = None
+                        st.rerun()
+    
     st.sidebar.markdown("---")
     if st.sidebar.button("🚪 Sair"):
         st.logout()
 
-    # Área principal do chat
-    st.title("🤖 Agente Coder")
+# --- ÁREA PRINCIPAL ---
+if st.session_state.pagina == "Chat":
+    # Título com botão de três pontinhos (configurações)
+    col_title, col_gear = st.columns([0.85, 0.15])
+    with col_title:
+        st.title("🤖 Agente Coder")
+    with col_gear:
+        if st.button("⚙️", help="Configurações de memória"):
+            st.session_state.pagina = "Memoria"
+            st.rerun()
+    
+    # Se não houver conversa ativa, criar uma nova
+    if not st.session_state.active_chat_id:
+        st.session_state.active_chat_id = criar_nova_conversa(user_email)
+        st.rerun()
+    
+    # Exibir histórico da conversa atual
     messages = carregar_historico_chat(st.session_state.active_chat_id)
     for msg in messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
-
+    
+    # Campo de entrada
     chat_prompt = st.chat_input("Digite sua mensagem...")
-
+    
     if chat_prompt:
-        # 1. Extrai memórias automaticamente via LLM (se houver conteúdo)
-        if len(chat_prompt) > 10:  # evitar chamadas para mensagens muito curtas
+        # Extrair memórias automaticamente (se for uma mensagem substancial)
+        if len(chat_prompt) > 10:
             extrair_memorias_llm(chat_prompt, user_email)
         
-        # 2. Salva e exibe mensagem do usuário
         salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
         atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
+        
         with st.chat_message("user"):
             st.markdown(chat_prompt)
-
-        # 3. Gera resposta do assistente
+        
         with st.chat_message("assistant"):
             with st.spinner("Pensando..."):
                 try:
@@ -292,24 +348,25 @@ if st.session_state.pagina == "Chat":
 
 else:
     # --- PÁGINA DE MEMÓRIA (Configurações) ---
+    col_back, _ = st.columns([0.1, 0.9])
+    with col_back:
+        if st.button("← Voltar"):
+            st.session_state.pagina = "Chat"
+            st.rerun()
+    
     st.title("🧠 Memória")
     st.caption("Gerencie as memórias que o agente tem sobre você. Ele as extrai automaticamente das conversas.")
-
-    # Carrega perfil completo
+    
     perfil = carregar_perfil(user_email)
     
-    # Se não houver memórias, exibe mensagem
     if not perfil:
         st.info("Nenhuma memória salva ainda. Converse com o agente e ele aprenderá sobre você.")
     
-    # Lista de categorias pré-definidas (para exibição ordenada)
     categorias_ordenadas = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
     
-    # Exibe cada categoria com seus itens
     for categoria in categorias_ordenadas:
         if categoria in perfil and perfil[categoria]:
             with st.expander(f"📂 {categoria}", expanded=True):
-                # Para cada chave/valor dentro da categoria
                 for chave, valor in perfil[categoria].items():
                     col1, col2, col3 = st.columns([0.3, 0.5, 0.2])
                     col1.write(f"**{chave}**")
@@ -318,7 +375,6 @@ else:
                         deletar_memoria(user_email, categoria, chave)
                         st.rerun()
     
-    # Seção para adicionar memória manualmente
     st.subheader("➕ Adicionar memória manualmente")
     with st.form("add_memory_form"):
         cols = st.columns(3)
@@ -333,9 +389,7 @@ else:
             salvar_perfil(user_email, nova_categoria, nova_chave, novo_valor)
             st.rerun()
     
-    # Opção para apagar todas as memórias
     if st.button("🗑️ Apagar todas as memórias", type="primary"):
-        # Confirmação simples
         conn = sqlite3.connect("memoria_agente.db")
         c = conn.cursor()
         c.execute("DELETE FROM perfil WHERE user_email = ?", (user_email,))
