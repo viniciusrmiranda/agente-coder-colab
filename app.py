@@ -3,23 +3,29 @@ import sqlite3
 from groq import Groq
 from duckduckgo_search import DDGS
 
-st.set_page_config(page_title="Agente Coder com Login Google", page_icon="🤖")
+st.set_page_config(page_title="Agente Coder", page_icon="🤖")
 
-# --- AUTENTICAÇÃO COM GOOGLE (Sintaxe st.user) ---
-if not st.user.is_logged_in:
-    st.title("🤖 Agente Coder")
-    st.write("Por favor, faça login com sua conta do Google para acessar seu agente e suas memórias.")
-    if st.button("🔑 Entrar com o Google"):
-        st.login("google")
+# --- LOGIN POR E-MAIL ---
+if "logged_user" not in st.session_state:
+    st.session_state.logged_user = None
+
+if not st.session_state.logged_user:
+    st.title("🤖 Agente Coder - Entrar")
+    st.write("Digite seu e-mail para acessar seu histórico e perfil de memória.")
+    
+    email_input = st.text_input("Seu e-mail (ex: usuario@gmail.com):")
+    if st.button("🔑 Entrar"):
+        if email_input and "@" in email_input:
+            st.session_state.logged_user = email_input.strip().lower()
+            st.rerun()
+        else:
+            st.warning("Insira um e-mail válido.")
     st.stop()
 
-# Usuário autenticado via Gmail
-user_email = st.user.email
-user_name = getattr(st.user, "name", user_email.split("@")[0])
+user_email = st.session_state.logged_user
+st.title(f"🤖 Olá, {user_email}!")
 
-st.title(f"🤖 Olá, {user_name}!")
-
-# --- BANCO DE DADOS (SQLite por E-mail do Google) ---
+# --- BANCO DE DADOS (SQLite) ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
@@ -45,13 +51,6 @@ def carregar_historico(email):
     conn.close()
     return [{"role": r[0], "content": r[1]} for r in rows]
 
-def salvar_perfil(email, chave, valor):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO perfil (user_email, chave, valor) VALUES (?, ?, ?)", (email, chave, valor))
-    conn.commit()
-    conn.close()
-
 def carregar_perfil(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
@@ -69,28 +68,29 @@ def limpar_memoria_usuario(email):
     conn.close()
 
 init_db()
-salvar_perfil(user_email, "Nome", user_name)
 
-# --- AUTENTICAÇÃO GROQ ---
+# --- VALIDAR GROQ API KEY ---
 api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
-    st.error("Chave GROQ_API_KEY não encontrada nos Secrets do Streamlit.")
+    st.error("GROQ_API_KEY não configurada nos Secrets do Streamlit.")
     st.stop()
 
 # --- BARRA LATERAL ---
-st.sidebar.title("👤 Sua Conta")
-st.sidebar.write(f"Conectado como:\n**{user_email}**")
+st.sidebar.title("👤 Conta")
+st.sidebar.write(f"Usuário: **{user_email}**")
 
-if st.sidebar.button("🚪 Sair (Logout)"):
-    st.logout()
+if st.sidebar.button("🚪 Sair"):
+    st.session_state.logged_user = None
+    st.session_state.messages = []
+    st.rerun()
 
 perfil_atual = carregar_perfil(user_email)
 if perfil_atual:
-    st.sidebar.subheader("Memória Pessoal Salva:")
+    st.sidebar.subheader("Memória Salva:")
     for k, v in perfil_atual.items():
         st.sidebar.write(f"- **{k}:** {v}")
 
-if st.sidebar.button("🗑️ Apagar Minhas Memórias"):
+if st.sidebar.button("🗑️ Limpar Minha Memória"):
     limpar_memoria_usuario(user_email)
     st.session_state.messages = []
     st.rerun()
@@ -103,27 +103,28 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if user_input := st.chat_input("Digite sua dúvida ou código..."):
+if user_input := st.chat_input("Digite sua dúvida de programação..."):
     salvar_mensagem(user_email, "user", user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Busca Web Automática
+    # Busca na Web
     extra_context = ""
     try:
         with DDGS() as ddgs:
             results = [f"- {r['title']}: {r['body']}" for r in ddgs.text(user_input, max_results=3)]
             if results:
-                extra_context = "\n\n--- Resultados da Busca na Web em Tempo Real ---\n" + "\n".join(results)
+                extra_context = "\n\n--- Resultados de Pesquisa ---\n" + "\n".join(results)
     except Exception as e:
-        extra_context = f"\n[Busca web desativada: {e}]"
+        extra_context = f"\n[Busca indisponível: {e}]"
 
     fatos_perfil = carregar_perfil(user_email)
-    texto_perfil = "\n".join([f"{k}: {v}" for k, v in fatos_perfil.items()]) if fatos_perfil else "Nenhum dado salvo."
+    texto_perfil = "\n".join([f"{k}: {v}" for k, v in fatos_perfil.items()]) if fatos_perfil else "Sem preferências registradas."
 
-    system_prompt = f"""Você é um assistente especialista em programação com memória de longo prazo.
-Memória retida sobre ESTE usuário específico ({user_name}):
+    system_prompt = f"""Você é um assistente especialista em código.
+Usuário atual: {user_email}
+Perfil retido do usuário:
 {texto_perfil}"""
 
     messages_payload = [{"role": "system", "content": system_prompt}]
@@ -134,11 +135,9 @@ Memória retida sobre ESTE usuário específico ({user_name}):
 
     with st.chat_message("assistant"):
         try:
-            clean_api_key = str(api_key).strip()
-            client = Groq(api_key=clean_api_key)
-            
+            client = Groq(api_key=str(api_key).strip())
             response = client.chat.completions.create(
-                model="openai/gpt-oss-20b",
+                model="llama-3.3-70b-versatile",
                 messages=messages_payload
             )
             bot_reply = response.choices[0].message.content
@@ -148,4 +147,4 @@ Memória retida sobre ESTE usuário específico ({user_name}):
             st.session_state.messages.append({"role": "assistant", "content": bot_reply})
 
         except Exception as err:
-            st.error(f"Erro na API da Groq: {err}")
+            st.error(f"Erro ao processar mensagem na Groq: {err}")
