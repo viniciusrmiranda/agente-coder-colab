@@ -7,6 +7,7 @@ import uuid
 import re
 import json
 import numpy as np
+from sentence_transformers import SentenceTransformer
 
 # --- TENTAR IMPORTAR LETTA (opcional) ---
 try:
@@ -27,26 +28,31 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
-# --- TENTAR CARREGAR SENTENCE-TRANSFORMERS (fallback) ---
-try:
-    from sentence_transformers import SentenceTransformer
-    embedder = SentenceTransformer('all-MiniLM-L6-v2')
-    EMBEDDING_AVAILABLE = True
-except Exception:
-    EMBEDDING_AVAILABLE = False
-    st.warning("⚠️ Embeddings não disponíveis. A busca semântica será limitada.")
+# --- CARREGAR MODELO DE EMBEDDING (LOCAL) ---
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer('all-MiniLM-L6-v2')
 
-# --- BANCO DE DADOS (histórico e memória local) ---
+embedder = load_embedder()
+
+# --- BANCO DE DADOS COM MEMÓRIA ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
+    
+    # Conversas
     c.execute('''CREATE TABLE IF NOT EXISTS conversas 
                  (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
                   criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Histórico
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
+    
+    # Memórias (com embedding armazenado como JSON)
     c.execute('''CREATE TABLE IF NOT EXISTS memorias 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, fato TEXT, embedding TEXT, criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
     conn.commit()
     conn.close()
 
@@ -98,83 +104,111 @@ def deletar_conversa(chat_id):
     conn.commit()
     conn.close()
 
-# --- FUNÇÕES DE MEMÓRIA LOCAL (fallback) ---
-def salvar_memoria_local(email, fato):
-    """Salva um fato na memória local com embedding se disponível."""
+# --- FUNÇÕES DE MEMÓRIA (preservadas) ---
+def salvar_memoria(email, fato):
+    """Salva um fato na memória com embedding."""
     if not fato or len(fato) < 5:
         return
-    embedding_json = None
-    if EMBEDDING_AVAILABLE:
-        try:
-            embedding = embedder.encode(fato).tolist()
-            embedding_json = json.dumps(embedding)
-        except:
-            pass
+    embedding = embedder.encode(fato).tolist()
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     c.execute("INSERT INTO memorias (user_email, fato, embedding) VALUES (?, ?, ?)", 
-              (email, fato, embedding_json))
+              (email, fato, json.dumps(embedding)))
     conn.commit()
     conn.close()
 
-def buscar_memorias_local(email, query, limit=3):
-    """Busca memórias locais (fallback)."""
+def buscar_memorias(email, query, limit=3):
+    """Busca memórias relevantes usando similaridade de cosseno."""
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("SELECT fato FROM memorias WHERE user_email = ? ORDER BY criado_em DESC", (email,))
+    c.execute("SELECT id, fato, embedding FROM memorias WHERE user_email = ? ORDER BY criado_em DESC", (email,))
     rows = c.fetchall()
     conn.close()
+    
     if not rows:
         return []
-    if EMBEDDING_AVAILABLE:
-        try:
-            # Busca semântica com embedding
-            c.execute("SELECT id, fato, embedding FROM memorias WHERE user_email = ?", (email,))
-            rows_full = c.fetchall()
-            query_embedding = embedder.encode(query)
-            resultados = []
-            for id, fato, emb_json in rows_full:
-                if emb_json:
-                    emb = np.array(json.loads(emb_json))
-                    sim = np.dot(query_embedding, emb) / (np.linalg.norm(query_embedding) * np.linalg.norm(emb) + 1e-8)
-                    resultados.append((sim, fato))
-            resultados.sort(key=lambda x: x[0], reverse=True)
-            return [fato for _, fato in resultados[:limit]]
-        except:
-            pass
-    # Fallback: busca por substring
-    palavras = query.lower().split()
-    if not palavras:
-        return []
-    condicoes = " OR ".join(["fato LIKE ?" for _ in palavras])
-    params = [f"%{p}%" for p in palavras]
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    c.execute(f"SELECT fato FROM memorias WHERE user_email = ? AND ({condicoes}) ORDER BY criado_em DESC LIMIT ?", (email, *params, limit))
-    rows = c.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
+    
+    query_embedding = embedder.encode(query)
+    resultados = []
+    for id, fato, emb_json in rows:
+        emb = np.array(json.loads(emb_json))
+        sim = np.dot(query_embedding, emb) / (np.linalg.norm(query_embedding) * np.linalg.norm(emb) + 1e-8)
+        resultados.append((sim, fato))
+    
+    resultados.sort(key=lambda x: x[0], reverse=True)
+    return [fato for _, fato in resultados[:limit]]
 
-# --- INICIALIZAR LETTA (se disponível) ---
+# --- EXTRAÇÃO DE MEMÓRIAS USANDO GROQ (preservada) ---
+def extrair_memorias_automatico(texto, email, api_key):
+    """Usa o Groq para extrair fatos da mensagem do usuário."""
+    # Lista de modelos gratuitos para extração (fallback)
+    modelos_extracao = [
+        "openai/gpt-oss-20b",
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it"
+    ]
+    
+    prompt = f"""
+    Analise a mensagem do usuário abaixo e extraia fatos importantes sobre ele (nome, interesses, profissão, projetos, habilidades, etc.).
+    Retorne APENAS uma lista de fatos, um por linha, sem numeração ou formatação extra.
+    Se não houver fatos relevantes, retorne a palavra "NENHUM".
+    
+    Mensagem: "{texto}"
+    """
+    
+    for model in modelos_extracao:
+        try:
+            client = Groq(api_key=str(api_key).strip())
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": "Você é um assistente especializado em extrair fatos de conversas."},
+                          {"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=200,
+            )
+            resultado = response.choices[0].message.content.strip()
+            if resultado and resultado != "NENHUM":
+                for linha in resultado.split('\n'):
+                    fato = linha.strip()
+                    if fato and len(fato) > 5:
+                        salvar_memoria(email, fato)
+                        st.toast(f"🧠 Memória salva: {fato[:50]}...", icon="✅")
+                return  # Sai após o primeiro sucesso
+        except Exception:
+            continue  # Tenta o próximo modelo
+
+# --- ====== NOVA PARTE: INTEGRAÇÃO COM LETTA ====== ---
+# Mantém tudo que já funciona, apenas adiciona Letta como camada extra
+
+# Tenta conectar ao Letta se disponível
 letta_api_key = st.secrets.get("LETTA_API_KEY")
+LETTA_ACTIVE = False
+letta_client = None
+agent_id = None
+
 if LETTA_AVAILABLE and letta_api_key:
     try:
-        client = Letta(token=letta_api_key)
+        # CORREÇÃO: usa 'api_key' em vez de 'token'
+        letta_client = Letta(api_key=letta_api_key)
+        
         # Nome do agente baseado no email do usuário
         AGENT_NAME = f"agente-coder-{user_email.replace('@', '-')}"
+        
         # Buscar agente existente
-        agentes = client.agents.list()
+        agentes = letta_client.agents.list()
         agente_existente = None
         for a in agentes:
             if a.name == AGENT_NAME:
                 agente_existente = a
                 break
+        
         if agente_existente:
             agent_id = agente_existente.id
             st.sidebar.success("🧠 Agente Letta carregado com memória persistente!")
         else:
             # Cria um novo agente
-            novo_agente = client.agents.create(
+            novo_agente = letta_client.agents.create(
                 name=AGENT_NAME,
                 model="groq/llama-3.3-70b-versatile",
                 embedding="openai/text-embedding-3-small",
@@ -185,15 +219,16 @@ if LETTA_AVAILABLE and letta_api_key:
             )
             agent_id = novo_agente.id
             st.sidebar.success("🧠 Novo agente Letta criado com memória persistente!")
+        
         LETTA_ACTIVE = True
+        
     except Exception as e:
         st.sidebar.warning(f"⚠️ Erro ao conectar com Letta: {e}. Usando modo fallback.")
         LETTA_ACTIVE = False
 else:
-    LETTA_ACTIVE = False
     if not LETTA_AVAILABLE:
         st.sidebar.info("ℹ️ Letta não instalado. Usando memória local.")
-    else:
+    elif not letta_api_key:
         st.sidebar.info("ℹ️ LETTA_API_KEY não configurada. Usando memória local.")
 
 init_db()
@@ -202,10 +237,27 @@ init_db()
 api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
     st.error("❌ GROQ_API_KEY não configurada nos Secrets do Streamlit.")
+    st.info("Por favor, configure sua chave de API da Groq em: Settings → Secrets → GROQ_API_KEY = 'sua_chave_aqui'")
     st.stop()
 
-# --- MODELO PRINCIPAL ---
-modelo_principal = "openai/gpt-oss-120b"
+# Testar a chave de API com uma chamada simples
+try:
+    test_client = Groq(api_key=str(api_key).strip())
+    test_client.models.list()  # Verifica se a chave é válida
+except Exception as e:
+    st.error(f"❌ Erro na chave de API da Groq: {e}")
+    st.info("Verifique se a chave está correta e ativa no console da Groq.")
+    st.stop()
+
+# --- MODELO PRINCIPAL (com fallback) ---
+modelos_principais = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.1-8b-instant",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it"
+]
+active_model = modelos_principais[0]  # Será substituído pelo primeiro que funcionar
 
 # --- GERENCIAMENTO DE SESSÃO ---
 if "active_chat_id" not in st.session_state:
@@ -236,21 +288,23 @@ with st.sidebar:
                     st.rerun()
     
     st.sidebar.markdown("---")
+    
+    # Exibir memórias salvas
     st.sidebar.subheader("🧠 Memórias")
     
-    # Mostrar memórias do Letta se ativo
-    if LETTA_ACTIVE:
+    # Se Letta estiver ativo, mostrar memórias do Letta
+    if LETTA_ACTIVE and letta_client and agent_id:
         try:
-            agent = client.agents.retrieve(agent_id)
+            agent = letta_client.agents.retrieve(agent_id)
             for block in agent.memory_blocks:
                 if block.label == "human":
-                    st.sidebar.info(f"👤 {block.value[:200]}...")
+                    st.sidebar.info(f"👤 Sobre você: {block.value[:100]}...")
                 elif block.label == "persona":
-                    st.sidebar.info(f"🤖 {block.value[:200]}...")
-        except:
-            pass
+                    st.sidebar.info(f"🤖 Sobre o agente: {block.value[:100]}...")
+        except Exception as e:
+            st.sidebar.warning(f"Erro ao carregar memórias do Letta: {e}")
     else:
-        # Mostrar memórias locais
+        # Fallback: mostrar memórias locais
         conn = sqlite3.connect("memoria_agente.db")
         c = conn.cursor()
         c.execute("SELECT fato FROM memorias WHERE user_email = ? ORDER BY criado_em DESC LIMIT 10", (user_email,))
@@ -281,78 +335,87 @@ for msg in messages:
 chat_prompt = st.chat_input("Digite sua mensagem...")
 
 if chat_prompt:
-    # Salvar mensagem do usuário no histórico local
+    # Salvar mensagem do usuário
     salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
     atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
     
     with st.chat_message("user"):
         st.markdown(chat_prompt)
     
+    # --- EXTRAIR MEMÓRIAS (sempre faz, independente do Letta) ---
+    extrair_memorias_automatico(chat_prompt, user_email, api_key)
+    
     # --- GERAR RESPOSTA ---
     with st.chat_message("assistant"):
         with st.spinner("Pensando..."):
-            try:
-                # Se Letta estiver ativo, usar ele
-                if LETTA_ACTIVE:
-                    response = client.agents.messages.create(
+            resposta_gerada = False
+            
+            # TENTA USAR LETTA PRIMEIRO (se disponível)
+            if LETTA_ACTIVE and letta_client and agent_id:
+                try:
+                    # Envia para o agente Letta
+                    response = letta_client.agents.messages.create(
                         agent_id=agent_id,
                         messages=[{"role": "user", "content": chat_prompt}]
                     )
+                    
+                    # Extrai a resposta do assistente
                     bot_reply = ""
                     for msg in response.messages:
                         if hasattr(msg, "message_type") and msg.message_type == "assistant_message":
                             bot_reply += getattr(msg, "content", "")
+                    
                     st.markdown(bot_reply)
-                    
-                    # Salvar no histórico local também
                     salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
+                    resposta_gerada = True
                     
-                    # Mostrar memórias atualizadas
-                    with st.expander("🧠 Memórias atualizadas"):
-                        agent = client.agents.retrieve(agent_id)
+                    # Mostra memórias atualizadas do Letta
+                    with st.expander("🧠 Memórias do Letta atualizadas"):
+                        agent = letta_client.agents.retrieve(agent_id)
                         for block in agent.memory_blocks:
                             if block.label == "human":
                                 st.write(f"**👤 Sobre você:** {block.value}")
                             elif block.label == "persona":
                                 st.write(f"**🤖 Sobre o agente:** {block.value}")
+                    
+                except Exception as e:
+                    st.warning(f"⚠️ Erro com Letta: {e}. Usando fallback Groq.")
+                    # Fallback para Groq
+            
+            # Se Letta falhou ou não está ativo, usa Groq (seu código original)
+            if not resposta_gerada:
+                # Buscar memórias relevantes para a pergunta (do banco local)
+                memorias_relevantes = buscar_memorias(user_email, chat_prompt, limit=3)
+                texto_memorias = "\n".join([f"- {mem}" for mem in memorias_relevantes]) if memorias_relevantes else "Nenhuma memória relevante encontrada."
                 
-                # Fallback: usar Groq diretamente
-                else:
-                    client_groq = Groq(api_key=str(api_key).strip())
-                    
-                    # Buscar memórias locais
-                    memorias = buscar_memorias_local(user_email, chat_prompt, limit=3)
-                    texto_memorias = "\n".join([f"- {mem}" for mem in memorias]) if memorias else "Nenhuma memória relevante encontrada."
-                    
-                    system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo da Groq.
-                    
-                    MEMÓRIAS SOBRE O USUÁRIO:
-                    {texto_memorias}
-                    
-                    Use essas memórias para personalizar suas respostas. Seja natural e direto."""
-                    
-                    historico = carregar_historico_chat(st.session_state.active_chat_id)
-                    messages_api = [{"role": "system", "content": system_prompt}] + historico
-                    
-                    chat_completion = client_groq.chat.completions.create(
-                        model=modelo_principal,
-                        messages=messages_api
-                    )
-                    bot_reply = chat_completion.choices[0].message.content
-                    st.markdown(bot_reply)
-                    
-                    # Salvar resposta no histórico
-                    salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
-                    
-                    # Tentar extrair memórias localmente (simples)
-                    if "meu nome é" in chat_prompt.lower():
-                        match = re.search(r"meu nome é\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)", chat_prompt, re.IGNORECASE)
-                        if match:
-                            nome = match.group(1).strip()
-                            salvar_memoria_local(user_email, f"nome: {nome}")
-                            st.toast(f"🧠 Memória salva: nome -> {nome}", icon="✅")
+                # Gerar resposta (tenta cada modelo até um funcionar)
+                for model in modelos_principais:
+                    try:
+                        client = Groq(api_key=str(api_key).strip())
+                        
+                        system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo da Groq.
+                        
+                        MEMÓRIAS SOBRE O USUÁRIO (extraídas automaticamente):
+                        {texto_memorias}
+                        
+                        Use essas memórias para personalizar suas respostas. Seja natural e direto."""
+                        
+                        historico = carregar_historico_chat(st.session_state.active_chat_id)
+                        messages_api = [{"role": "system", "content": system_prompt}] + historico
+                        
+                        chat_completion = client.chat.completions.create(
+                            model=model,
+                            messages=messages_api
+                        )
+                        bot_reply = chat_completion.choices[0].message.content
+                        st.markdown(bot_reply)
+                        
+                        # Salvar resposta
+                        salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
+                        resposta_gerada = True
+                        break  # Sai do loop se funcionou
+                    except Exception as err:
+                        continue  # Tenta o próximo modelo
                 
-            except Exception as err:
-                st.error(f"⚠️ Erro: {err}")
-
-st.caption("🧠 Este agente pode ter memória persistente via Letta.")
+                if not resposta_gerada:
+                    st.error("⚠️ Nenhum modelo disponível funcionou. Verifique sua chave de API ou tente novamente mais tarde.")
