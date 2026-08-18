@@ -159,6 +159,8 @@ def extrair_memorias_por_regex(texto):
         "nome": r"(?:meu nome é|eu sou|chamo-me|me chamo|sou o|sou a|me chamo de)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
         "cidade": r"(?:moro em|sou de|resido em|de)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
         "profissão": r"(?:sou|trabalho como|atualmente sou|profissão|trabalho com)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:desenvolvedor|engenheiro|analista|designer|gerente|estudante|professor|advogado|médico|arquiteto))",
+        "filho": r"(?:meu filho|minha filha|meu menino|minha menina|meu pequeno|minha pequena)\s+(?:se chama|chama-se|é)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
+        "esposa": r"(?:minha esposa|minha mulher|minha namorada|meu marido|meu namorado)\s+(?:se chama|chama-se|é)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
     }
     encontrados = {}
     for chave, padrao in padroes.items():
@@ -184,10 +186,13 @@ def extrair_memorias_por_llm(ultimas_mensagens, email):
     dialogo = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in ultimas_mensagens])
     
     prompt = f"""
-    Analise o diálogo a seguir entre um usuário e um assistente.
-    Extraia FATOS RELEVANTES sobre o usuário: nome, profissão, interesses, habilidades, projetos, preferências, localização, etc.
+    Você é um assistente especializado em extrair informações relevantes sobre o usuário a partir de conversas.
+    Analise o diálogo abaixo e identifique QUALQUER informação que o usuário compartilhou sobre si mesmo, sua família, interesses, projetos, habilidades, preferências, localização, estudos, trabalho, estilo de escrita, áreas de atuação, etc.
     
-    Para cada fato, defina uma CATEGORIA entre: {', '.join(categorias)}.
+    **REGRA IMPORTANTE**: Você deve considerar relevante TUDO que o usuário disser sobre si mesmo ou sobre pessoas próximas a ele (como filhos, cônjuges, etc.). Não descarte informações por achá-las triviais.
+    
+    Para cada informação extraída, defina uma CATEGORIA entre: {', '.join(categorias)}.
+    Use 'Você' para informações pessoais (nome, idade, família), 'Tópicos' para assuntos de interesse, 'Interesses' para hobbies, 'Recent Work' para projetos recentes, 'Skills' para habilidades técnicas, 'Study' para estudos, 'Writing Style' para estilo de escrita, 'Áreas' para áreas de atuação.
     
     Retorne APENAS um objeto JSON válido com a estrutura:
     {{
@@ -195,7 +200,8 @@ def extrair_memorias_por_llm(ultimas_mensagens, email):
             {{"categoria": "categoria", "chave": "chave_descritiva", "valor": "valor"}}
         ]
     }}
-    Se não houver fatos relevantes, retorne {{"memorias": []}}.
+    Se não houver informações relevantes, retorne {{"memorias": []}}.
+    
     DIÁLOGO:
     {dialogo}
     """
@@ -241,9 +247,10 @@ def extrair_memorias_automaticamente(user_msg, assistant_msg, ultimas_mensagens,
             st.toast(f"🧠 Memória salva: {chave} -> {valor}", icon="✅")
     
     # 2. Se não salvou com regex, tenta LLM (apenas se houver contexto suficiente)
-    if not salvou and len(user_msg) > 3:
-        # Prepara as últimas 3 interações para contexto
-        contexto = ultimas_mensagens[-4:] if len(ultimas_mensagens) >= 4 else ultimas_mensagens
+    # Ou sempre tenta LLM para capturar informações implícitas (como "Vinícius" isolado)
+    if not salvou or len(user_msg) > 3:
+        # Prepara as últimas 5 interações para contexto
+        contexto = ultimas_mensagens[-6:] if len(ultimas_mensagens) >= 6 else ultimas_mensagens
         if extrair_memorias_por_llm(contexto, email):
             salvou = True
     
@@ -416,6 +423,9 @@ if st.session_state.pagina == "Chat":
                         )
                         if salvou:
                             st.toast("🧠 Memórias atualizadas!", icon="✅")
+                        else:
+                            # Se não salvou nada, exibe um toast informativo (opcional)
+                            pass
                     
                 except Exception as err:
                     st.error(f"⚠️ Erro ao conectar com a Groq: {err}")
