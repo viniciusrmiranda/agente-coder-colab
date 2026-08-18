@@ -1,66 +1,77 @@
 ﻿import streamlit as st
 import sqlite3
-import uuid
 from groq import Groq
 from duckduckgo_search import DDGS
 
-st.set_page_config(page_title="Agente Coder Multi-Usuário", page_icon="🤖")
-st.title("🤖 Agente Coder - Memória Isolada")
+st.set_page_config(page_title="Agente Coder com Login Google", page_icon="🤖")
 
-# --- GERENCIAMENTO DE IDENTIDADE DO USUÁRIO ---
-if "user_id" not in st.session_state:
-    st.session_state.user_id = str(uuid.uuid4())[:8]
+# --- AUTENTICAÇÃO COM GOOGLE ---
+if not st.experimental_user.is_logged_in:
+    st.title("🤖 Agente Coder")
+    st.write("Por favor, faça login com sua conta do Google para acessar seu agente e suas memórias.")
+    if st.button("🔑 Entrar com o Google"):
+        st.login("google")
+    st.stop()
 
-# --- BANCO DE DADOS (SQLite por Usuário) ---
+# Usuário autenticado via Gmail
+user_email = st.experimental_user.email
+user_name = st.experimental_user.name
+
+st.title(f"🤖 Olá, {user_name}!")
+
+# --- BANCO DE DADOS (SQLite por E-mail do Google) ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, role TEXT, content TEXT)''')
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, role TEXT, content TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS perfil 
-                 (user_id TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_id, chave))''')
+                 (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))''')
     conn.commit()
     conn.close()
 
-def salvar_mensagem(user_id, role, content):
+def salvar_mensagem(email, role, content):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("INSERT INTO historico (user_id, role, content) VALUES (?, ?, ?)", (user_id, role, content))
+    c.execute("INSERT INTO historico (user_email, role, content) VALUES (?, ?, ?)", (email, role, content))
     conn.commit()
     conn.close()
 
-def carregar_historico(user_id):
+def carregar_historico(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("SELECT role, content FROM historico WHERE user_id = ?", (user_id,))
+    c.execute("SELECT role, content FROM historico WHERE user_email = ?", (email,))
     rows = c.fetchall()
     conn.close()
     return [{"role": r[0], "content": r[1]} for r in rows]
 
-def salvar_perfil(user_id, chave, valor):
+def salvar_perfil(email, chave, valor):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO perfil (user_id, chave, valor) VALUES (?, ?, ?)", (user_id, chave, valor))
+    c.execute("INSERT OR REPLACE INTO perfil (user_email, chave, valor) VALUES (?, ?, ?)", (email, chave, valor))
     conn.commit()
     conn.close()
 
-def carregar_perfil(user_id):
+def carregar_perfil(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("SELECT chave, valor FROM perfil WHERE user_id = ?", (user_id,))
+    c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
     rows = c.fetchall()
     conn.close()
     return {r[0]: r[1] for r in rows}
 
-def limpar_memoria_usuario(user_id):
+def limpar_memoria_usuario(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("DELETE FROM historico WHERE user_id = ?", (user_id,))
-    c.execute("DELETE FROM perfil WHERE user_id = ?", (user_id,))
+    c.execute("DELETE FROM historico WHERE user_email = ?", (email,))
+    c.execute("DELETE FROM perfil WHERE user_email = ?", (email,))
     conn.commit()
     conn.close()
 
 init_db()
+
+# Salva o nome vindo da conta do Google automaticamente
+salvar_perfil(user_email, "Nome", user_name)
 
 # --- AUTENTICAÇÃO GROQ ---
 api_key = st.secrets.get("GROQ_API_KEY")
@@ -69,40 +80,33 @@ if not api_key:
     st.stop()
 
 # --- BARRA LATERAL ---
-st.sidebar.title("👤 Identificação de Sessão")
-user_input_id = st.sidebar.text_input("Seu ID / Nome de Usuário:", value=st.session_state.user_id)
+st.sidebar.title("👤 Sua Conta")
+st.sidebar.write(f"Conectado como:\n**{user_email}**")
 
-if user_input_id != st.session_state.user_id:
-    st.session_state.user_id = user_input_id
-    st.session_state.messages = carregar_historico(user_input_id)
-    st.rerun()
+if st.sidebar.button("🚪 Sair (Logout)"):
+    st.logout()
 
-st.sidebar.write(f"ID Ativo: **{st.session_state.user_id}**")
-
-perfil_atual = carregar_perfil(st.session_state.user_id)
+perfil_atual = carregar_perfil(user_email)
 if perfil_atual:
-    st.sidebar.subheader("Memória deste Usuário:")
+    st.sidebar.subheader("Memória Pessoal Salva:")
     for k, v in perfil_atual.items():
         st.sidebar.write(f"- **{k}:** {v}")
 
-if st.sidebar.button("🗑️ Limpar Minha Memória"):
-    limpar_memoria_usuario(st.session_state.user_id)
+if st.sidebar.button("🗑️ Apagar Minhas Memórias"):
+    limpar_memoria_usuario(user_email)
     st.session_state.messages = []
     st.rerun()
 
-# --- CARREGAMENTO DE MENSAGENS ---
+# --- CHAT ---
 if "messages" not in st.session_state:
-    st.session_state.messages = carregar_historico(st.session_state.user_id)
+    st.session_state.messages = carregar_historico(user_email)
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# --- PROCESSAMENTO DO CHAT ---
-if user_input := st.chat_input("Digite sua mensagem..."):
-    current_uid = st.session_state.user_id
-    
-    salvar_mensagem(current_uid, "user", user_input)
+if user_input := st.chat_input("Digite sua dúvida ou código..."):
+    salvar_mensagem(user_email, "user", user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
@@ -117,11 +121,11 @@ if user_input := st.chat_input("Digite sua mensagem..."):
     except Exception as e:
         extra_context = f"\n[Busca web desativada: {e}]"
 
-    fatos_perfil = carregar_perfil(current_uid)
+    fatos_perfil = carregar_perfil(user_email)
     texto_perfil = "\n".join([f"{k}: {v}" for k, v in fatos_perfil.items()]) if fatos_perfil else "Nenhum dado salvo."
 
     system_prompt = f"""Você é um assistente especialista em programação com memória de longo prazo.
-Memória retida sobre ESTE usuário específico:
+Memória retida sobre ESTE usuário específico ({user_name}):
 {texto_perfil}"""
 
     messages_payload = [{"role": "system", "content": system_prompt}]
@@ -142,14 +146,8 @@ Memória retida sobre ESTE usuário específico:
             bot_reply = response.choices[0].message.content
             st.markdown(bot_reply)
             
-            salvar_mensagem(current_uid, "assistant", bot_reply)
+            salvar_mensagem(user_email, "assistant", bot_reply)
             st.session_state.messages.append({"role": "assistant", "content": bot_reply})
-
-            if "meu nome é" in user_input.lower() or "me chamo" in user_input.lower():
-                partes = user_input.split()
-                nome = partes[-1].capitalize()
-                salvar_perfil(current_uid, "Nome", nome)
-                st.rerun()
 
         except Exception as err:
             st.error(f"Erro na API da Groq: {err}")
