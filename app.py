@@ -160,6 +160,7 @@ def extrair_memorias_por_regex(texto):
         "cidade": r"(?:moro em|sou de|resido em|de)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
         "profissão": r"(?:sou|trabalho como|atualmente sou|profissão|trabalho com)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:desenvolvedor|engenheiro|analista|designer|gerente|estudante|professor|advogado|médico|arquiteto))",
         "filho": r"(?:meu filho|minha filha|meu menino|minha menina|meu pequeno|minha pequena)\s+(?:se chama|chama-se|é)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
+        "filho_nome": r"(?:ele se chama|ela se chama|chama-se)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",  # captura "ele se chama José"
         "esposa": r"(?:minha esposa|minha mulher|minha namorada|meu marido|meu namorado)\s+(?:se chama|chama-se|é)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
     }
     encontrados = {}
@@ -171,10 +172,9 @@ def extrair_memorias_por_regex(texto):
                 encontrados[chave] = valor
     return encontrados
 
-def extrair_memorias_por_llm(ultimas_mensagens, email):
+def extrair_memorias_por_llm(historico_completo, email):
     """
-    Usa o LLM para extrair memórias do diálogo.
-    Recebe uma lista de mensagens [{"role": "user", "content": ...}, {"role": "assistant", ...}]
+    Usa o LLM para extrair memórias do diálogo COMPLETO (todas as mensagens).
     """
     api_key = st.secrets.get("GROQ_API_KEY")
     if not api_key:
@@ -182,14 +182,18 @@ def extrair_memorias_por_llm(ultimas_mensagens, email):
     
     categorias = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
     
-    # Monta o diálogo para o prompt
-    dialogo = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in ultimas_mensagens])
+    # Monta o diálogo completo
+    dialogo = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in historico_completo])
     
     prompt = f"""
     Você é um assistente especializado em extrair informações relevantes sobre o usuário a partir de conversas.
-    Analise o diálogo abaixo e identifique QUALQUER informação que o usuário compartilhou sobre si mesmo, sua família, interesses, projetos, habilidades, preferências, localização, estudos, trabalho, estilo de escrita, áreas de atuação, etc.
     
-    **REGRA IMPORTANTE**: Você deve considerar relevante TUDO que o usuário disser sobre si mesmo ou sobre pessoas próximas a ele (como filhos, cônjuges, etc.). Não descarte informações por achá-las triviais.
+    Analise TODO o diálogo abaixo e identifique QUALQUER informação que o usuário compartilhou sobre si mesmo, sua família (filhos, cônjuges, pais, etc.), interesses, projetos, habilidades, preferências, localização, estudos, trabalho, estilo de escrita, áreas de atuação, etc.
+    
+    **REGRAS IMPORTANTES:**
+    1. Considere como RELEVANTE absolutamente TUDO que o usuário disser sobre si mesmo ou sobre pessoas próximas. Nomes de filhos, idades, hobbies, etc. são extremamente importantes.
+    2. Se o usuário mencionou o nome de alguém (ex: "meu filho se chama José"), extraia isso como uma memória.
+    3. Não descarte informações por achá-las triviais.
     
     Para cada informação extraída, defina uma CATEGORIA entre: {', '.join(categorias)}.
     Use 'Você' para informações pessoais (nome, idade, família), 'Tópicos' para assuntos de interesse, 'Interesses' para hobbies, 'Recent Work' para projetos recentes, 'Skills' para habilidades técnicas, 'Study' para estudos, 'Writing Style' para estilo de escrita, 'Áreas' para áreas de atuação.
@@ -231,28 +235,26 @@ def extrair_memorias_por_llm(ultimas_mensagens, email):
     except Exception as e:
         return False
 
-def extrair_memorias_automaticamente(user_msg, assistant_msg, ultimas_mensagens, email):
+def extrair_memorias_automaticamente(historico_completo, email):
     """
     Tenta extrair memórias usando:
-    1. Regex (rápido) na mensagem do usuário.
+    1. Regex em todas as mensagens do usuário.
     2. LLM (mais inteligente) usando o diálogo completo.
     """
     salvou = False
     
-    # 1. Regex na mensagem do usuário
-    regex_results = extrair_memorias_por_regex(user_msg)
-    for chave, valor in regex_results.items():
-        if salvar_perfil(email, "Você", chave, valor):
-            salvou = True
-            st.toast(f"🧠 Memória salva: {chave} -> {valor}", icon="✅")
+    # 1. Regex em todas as mensagens do usuário
+    for msg in historico_completo:
+        if msg["role"] == "user":
+            regex_results = extrair_memorias_por_regex(msg["content"])
+            for chave, valor in regex_results.items():
+                if salvar_perfil(email, "Você", chave, valor):
+                    salvou = True
+                    st.toast(f"🧠 Memória salva: {chave} -> {valor}", icon="✅")
     
-    # 2. Se não salvou com regex, tenta LLM (apenas se houver contexto suficiente)
-    # Ou sempre tenta LLM para capturar informações implícitas (como "Vinícius" isolado)
-    if not salvou or len(user_msg) > 3:
-        # Prepara as últimas 5 interações para contexto
-        contexto = ultimas_mensagens[-6:] if len(ultimas_mensagens) >= 6 else ultimas_mensagens
-        if extrair_memorias_por_llm(contexto, email):
-            salvou = True
+    # 2. SEMPRE chama o LLM para capturar informações implícitas
+    if extrair_memorias_por_llm(historico_completo, email):
+        salvou = True
     
     return salvou
 
@@ -391,11 +393,16 @@ if st.session_state.pagina == "Chat":
                         for chave, valor in itens.items():
                             texto_perfil += f"{chave}: {valor}\n"
                     
+                    # INSTRUÇÃO: ser conciso e perguntar se houver dúvida
                     system_prompt = f"""Você é um assistente especialista em programação.
                     Você se lembra das seguintes informações sobre o usuário (organizadas por categoria):
                     {texto_perfil if texto_perfil else "Nenhuma memória registrada ainda."}
                     
-                    Use essas informações para personalizar suas respostas."""
+                    **INSTRUÇÕES DE COMPORTAMENTO:**
+                    1. Seja direto e conciso. Evite respostas longas desnecessárias.
+                    2. Se o usuário fizer uma afirmação vaga ou ambígua, PERGUNTE o que ele quer dizer ou como você pode ajudar, em vez de supor e dar explicações extensas.
+                    3. Use as memórias para personalizar, mas não fique repetindo informações que você já sabe.
+                    4. Se o usuário mencionar algo novo (como um filho, um interesse, etc.), anote mentalmente, mas não precisa fazer uma lista de tudo — apenas use para contextualizar futuras respostas."""
                     
                     historico = carregar_historico_chat(st.session_state.active_chat_id)
                     messages_api = [{"role": "system", "content": system_prompt}] + historico
@@ -411,21 +418,11 @@ if st.session_state.pagina == "Chat":
                     salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
                     
                     # 4. Extrai memórias (USANDO O DIÁLOGO COMPLETO)
-                    # Pega o histórico atualizado (já com a última interação)
                     historico_atualizado = carregar_historico_chat(st.session_state.active_chat_id)
-                    # Chama extração com as últimas mensagens
                     with st.spinner("🧠 Atualizando memórias..."):
-                        salvou = extrair_memorias_automaticamente(
-                            chat_prompt, 
-                            bot_reply, 
-                            historico_atualizado, 
-                            user_email
-                        )
+                        salvou = extrair_memorias_automaticamente(historico_atualizado, user_email)
                         if salvou:
                             st.toast("🧠 Memórias atualizadas!", icon="✅")
-                        else:
-                            # Se não salvou nada, exibe um toast informativo (opcional)
-                            pass
                     
                 except Exception as err:
                     st.error(f"⚠️ Erro ao conectar com a Groq: {err}")
