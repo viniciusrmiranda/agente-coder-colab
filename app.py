@@ -18,12 +18,12 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
-# --- CONFIGURAÇÃO DO MEM0 (SEM OLLAMA) ---
+# --- CONFIGURAÇÃO DO MEM0 (CORRETA PARA v2.0.18) ---
 config = {
     "llm": {
         "provider": "groq",
         "config": {
-            "model": "llama3-70b-8192",  # Modelo estável da Groq
+            "model": "llama3-70b-8192",  # Modelo estável na Groq
             "temperature": 0.1,
             "max_tokens": 2000,
         }
@@ -31,7 +31,15 @@ config = {
     "embedder": {
         "provider": "sentence-transformers",
         "config": {
-            "model": "all-MiniLM-L6-v2"  # Embedder local, sem API
+            "model": "all-MiniLM-L6-v2"
+        }
+    },
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {
+            "host": "localhost",
+            "port": 6333,
+            "embedding_model_dims": 384,  # Dimensão do all-MiniLM-L6-v2
         }
     }
 }
@@ -112,8 +120,8 @@ if not api_key:
     st.error("GROQ_API_KEY não configurada nos Secrets.")
     st.stop()
 
-# --- MODELO ATIVO ---
-active_model = "llama3-70b-8192"  # Ou "openai/gpt-oss-120b", se preferir
+# --- MODELO ATIVO (pode ser o mesmo da config do Mem0) ---
+active_model = "llama3-70b-8192"
 
 # --- GERENCIAMENTO DE SESSÃO ---
 if "active_chat_id" not in st.session_state:
@@ -142,7 +150,8 @@ with st.sidebar:
                     deletar_conversa(chat_id)
                     st.rerun()
     st.sidebar.markdown("---")
-    # Exibir memórias
+    
+    # Exibir memórias salvas
     st.sidebar.subheader("🧠 Memórias")
     try:
         memorias = memory.search(query="", user_id=user_email, limit=10)
@@ -153,6 +162,7 @@ with st.sidebar:
             st.sidebar.info("Nenhuma memória salva ainda.")
     except Exception as e:
         st.sidebar.info("Memórias ainda não disponíveis.")
+
     if st.sidebar.button("🚪 Sair"):
         st.logout()
 
@@ -174,7 +184,7 @@ if chat_prompt:
     atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
     with st.chat_message("user"):
         st.markdown(chat_prompt)
-    
+
     # Buscar memórias relevantes
     try:
         memorias_relevantes = memory.search(
@@ -188,7 +198,7 @@ if chat_prompt:
                 texto_memorias += f"- {mem['memory']}\n"
     except Exception:
         texto_memorias = "[Erro ao buscar memórias]"
-    
+
     # Gerar resposta
     with st.chat_message("assistant"):
         with st.spinner("Pensando..."):
@@ -212,7 +222,7 @@ if chat_prompt:
                 st.markdown(bot_reply)
                 salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
                 
-                # Salvar interação no Mem0
+                # Salvar interação na memória do Mem0
                 try:
                     memory.add(
                         [
