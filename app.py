@@ -20,24 +20,36 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
-# --- BANCO DE DADOS (SQLite Avançado) ---
+# --- BANCO DE DADOS COM MIGRAÇÃO FORÇADA ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     
-    # Tabela conversas com migração para coluna fixado
-    c.execute('''CREATE TABLE IF NOT EXISTS conversas 
-                 (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
-                  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    c.execute("PRAGMA table_info(conversas)")
-    colunas = [col[1] for col in c.fetchall()]
-    if "fixado" not in colunas:
-        c.execute("ALTER TABLE conversas ADD COLUMN fixado INTEGER DEFAULT 0")
+    # Verifica se a tabela conversas existe
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversas'")
+    tabela_existe = c.fetchone()
     
+    if not tabela_existe:
+        # Cria do zero com a coluna fixado
+        c.execute('''CREATE TABLE conversas (
+            chat_id TEXT PRIMARY KEY,
+            user_email TEXT,
+            titulo TEXT,
+            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            fixado INTEGER DEFAULT 0
+        )''')
+    else:
+        # Verifica se a coluna fixado existe
+        c.execute("PRAGMA table_info(conversas)")
+        colunas = [col[1] for col in c.fetchall()]
+        if "fixado" not in colunas:
+            c.execute("ALTER TABLE conversas ADD COLUMN fixado INTEGER DEFAULT 0")
+    
+    # Tabela historico
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
     
-    # Tabela de perfil
+    # Tabela perfil com categoria
     try:
         c.execute("SELECT user_email, categoria, chave, valor FROM perfil LIMIT 1")
     except sqlite3.OperationalError:
@@ -50,6 +62,7 @@ def init_db():
             atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (user_email, categoria, chave)
         )''')
+    
     conn.commit()
     conn.close()
 
@@ -152,14 +165,21 @@ def deletar_memoria(email, categoria, chave):
     conn.commit()
     conn.close()
 
-# --- EXTRAÇÃO AUTOMÁTICA COM LLM + FALLBACK ---
+# --- EXTRAÇÃO DE MEMÓRIAS (LLM + REGEX FALLBACK) ---
 def extrair_memorias(texto, email):
-    """Tenta extrair com LLM, se falhar usa regex."""
-    # Primeiro, tenta extração via LLM
-    sucesso = extrair_memorias_llm(texto, email)
-    if not sucesso:
-        # Fallback: regex simples
-        extrair_memorias_regex(texto, email)
+    """Tenta LLM, se falhar usa regex. Retorna True se salvou algo."""
+    salvou = False
+    # Tenta LLM
+    try:
+        salvou = extrair_memorias_llm(texto, email)
+    except Exception:
+        pass
+    
+    # Se LLM não salvou nada, tenta regex
+    if not salvou:
+        salvou = extrair_memorias_regex(texto, email)
+    
+    return salvou
 
 def extrair_memorias_llm(texto, email):
     api_key = st.secrets.get("GROQ_API_KEY")
@@ -191,29 +211,34 @@ def extrair_memorias_llm(texto, email):
         )
         resultado = response.choices[0].message.content
         dados = json.loads(resultado)
+        salvou = False
         for mem in dados.get("memorias", []):
             categoria = mem.get("categoria", "Você")
             chave = mem.get("chave", "").strip()
             valor = mem.get("valor", "").strip()
             if chave and valor and categoria in categorias_possiveis:
                 salvar_perfil(email, categoria, chave, valor)
-        return True
-    except Exception as e:
+                salvou = True
+        return salvou
+    except Exception:
         return False
 
 def extrair_memorias_regex(texto, email):
-    """Fallback usando regex para capturar nome, cidade, profissão."""
+    """Regex para capturar nome, cidade, profissão, interesses."""
     padroes = {
-        "nome": r"(?:meu nome é|eu sou|chamo-me|me chamo)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
+        "nome": r"(?:meu nome é|eu sou|chamo-me|me chamo|sou o|sou a)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
         "cidade": r"(?:moro em|sou de|resido em)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
-        "profissão": r"(?:sou|trabalho como|atualmente sou)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:desenvolvedor|engenheiro|analista|designer|gerente|estudante|professor))",
+        "profissão": r"(?:sou|trabalho como|atualmente sou)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:desenvolvedor|engenheiro|analista|designer|gerente|estudante|professor|arquiteto|cientista))",
     }
+    salvou = False
     for chave, padrao in padroes.items():
         match = re.search(padrao, texto, re.IGNORECASE)
         if match:
             valor = match.group(1).strip()
             if len(valor) > 2:
                 salvar_perfil(email, "Você", chave, valor)
+                salvou = True
+    return salvou
 
 init_db()
 
@@ -308,7 +333,6 @@ with st.sidebar:
 
 # --- ÁREA PRINCIPAL ---
 if st.session_state.pagina == "Chat":
-    # Cabeçalho com botão de três pontinhos (⋮) para acessar memória
     col_title, col_menu = st.columns([0.85, 0.15])
     with col_title:
         st.title("🤖 Agente Coder")
@@ -330,7 +354,9 @@ if st.session_state.pagina == "Chat":
     
     if chat_prompt:
         # Extrair memórias automaticamente
-        extrair_memorias(chat_prompt, user_email)
+        salvou_memoria = extrair_memorias(chat_prompt, user_email)
+        if salvou_memoria:
+            st.toast("🧠 Memória salva automaticamente!", icon="✅")
         
         salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
         atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
