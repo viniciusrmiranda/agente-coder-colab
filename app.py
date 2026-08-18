@@ -5,8 +5,8 @@ from duckduckgo_search import DDGS
 
 st.set_page_config(page_title="Agente Coder com Login Google", page_icon="🤖")
 
-# --- AUTENTICAÇÃO COM GOOGLE ---
-if not st.experimental_user.is_logged_in:
+# --- AUTENTICAÇÃO COM GOOGLE (Sintaxe st.user) ---
+if not st.user.is_logged_in:
     st.title("🤖 Agente Coder")
     st.write("Por favor, faça login com sua conta do Google para acessar seu agente e suas memórias.")
     if st.button("🔑 Entrar com o Google"):
@@ -14,8 +14,8 @@ if not st.experimental_user.is_logged_in:
     st.stop()
 
 # Usuário autenticado via Gmail
-user_email = st.experimental_user.email
-user_name = st.experimental_user.name
+user_email = st.user.email
+user_name = getattr(st.user, "name", user_email.split("@")[0])
 
 st.title(f"🤖 Olá, {user_name}!")
 
@@ -69,8 +69,6 @@ def limpar_memoria_usuario(email):
     conn.close()
 
 init_db()
-
-# Salva o nome vindo da conta do Google automaticamente
 salvar_perfil(user_email, "Nome", user_name)
 
 # --- AUTENTICAÇÃO GROQ ---
