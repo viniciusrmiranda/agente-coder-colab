@@ -18,12 +18,12 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
-# --- CONFIGURAÇÃO DO MEM0 (CORRETA PARA v2.0.18) ---
+# --- CONFIGURAÇÃO CORRETA DO MEM0 (v2.0.18) ---
 config = {
     "llm": {
         "provider": "groq",
         "config": {
-            "model": "llama3-70b-8192",  # Modelo estável na Groq
+            "model": "llama3-70b-8192",
             "temperature": 0.1,
             "max_tokens": 2000,
         }
@@ -39,7 +39,7 @@ config = {
         "config": {
             "host": "localhost",
             "port": 6333,
-            "embedding_model_dims": 384,  # Dimensão do all-MiniLM-L6-v2
+            "embedding_model_dims": 384,  # dimensão do all-MiniLM-L6-v2
         }
     }
 }
@@ -51,16 +51,20 @@ memory = Memory.from_config(config)
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
+    
     c.execute('''CREATE TABLE IF NOT EXISTS conversas 
                  (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
                   criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
+    
     try:
         c.execute("SELECT user_email, chave, valor FROM perfil LIMIT 1")
     except sqlite3.OperationalError:
         c.execute("DROP TABLE IF EXISTS perfil")
         c.execute("CREATE TABLE perfil (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))")
+    
     conn.commit()
     conn.close()
 
@@ -112,6 +116,25 @@ def deletar_conversa(chat_id):
     conn.commit()
     conn.close()
 
+def carregar_perfil(email):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    try:
+        c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
+        rows = c.fetchall()
+        conn.close()
+        return {r[0]: r[1] for r in rows}
+    except sqlite3.OperationalError:
+        conn.close()
+        return {}
+
+def salvar_perfil(email, chave, valor):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO perfil (user_email, chave, valor) VALUES (?, ?, ?)", (email, chave, valor))
+    conn.commit()
+    conn.close()
+
 init_db()
 
 # --- VALIDAR GROQ API KEY ---
@@ -120,7 +143,7 @@ if not api_key:
     st.error("GROQ_API_KEY não configurada nos Secrets.")
     st.stop()
 
-# --- MODELO ATIVO (pode ser o mesmo da config do Mem0) ---
+# --- MODELO ATIVO ---
 active_model = "llama3-70b-8192"
 
 # --- GERENCIAMENTO DE SESSÃO ---
@@ -130,11 +153,14 @@ if "active_chat_id" not in st.session_state:
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("📋 Conversas")
+    
     if st.button("➕ Nova Conversa", use_container_width=True):
         novo_id = criar_nova_conversa(user_email)
         st.session_state.active_chat_id = novo_id
         st.rerun()
+    
     st.markdown("---")
+    
     conversas = listar_conversas(user_email)
     if not conversas:
         st.info("Nenhuma conversa encontrada.")
@@ -149,9 +175,10 @@ with st.sidebar:
                 if st.button("🗑️", key=f"del_{chat_id}"):
                     deletar_conversa(chat_id)
                     st.rerun()
+    
     st.sidebar.markdown("---")
     
-    # Exibir memórias salvas
+    # --- EXIBIR MEMÓRIAS SALVAS ---
     st.sidebar.subheader("🧠 Memórias")
     try:
         memorias = memory.search(query="", user_id=user_email, limit=10)
@@ -162,7 +189,9 @@ with st.sidebar:
             st.sidebar.info("Nenhuma memória salva ainda.")
     except Exception as e:
         st.sidebar.info("Memórias ainda não disponíveis.")
-
+    
+    st.sidebar.markdown("---")
+    st.sidebar.write(f"Conectado como: {user_email}")
     if st.sidebar.button("🚪 Sair"):
         st.logout()
 
@@ -180,12 +209,14 @@ for msg in messages:
 chat_prompt = st.chat_input("Digite sua mensagem...")
 
 if chat_prompt:
+    # 1. Salva a mensagem do usuário
     salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
     atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
+    
     with st.chat_message("user"):
         st.markdown(chat_prompt)
-
-    # Buscar memórias relevantes
+    
+    # 2. Busca memórias relevantes no Mem0
     try:
         memorias_relevantes = memory.search(
             query=chat_prompt,
@@ -196,14 +227,15 @@ if chat_prompt:
         if memorias_relevantes and "results" in memorias_relevantes:
             for mem in memorias_relevantes["results"]:
                 texto_memorias += f"- {mem['memory']}\n"
-    except Exception:
+    except Exception as e:
         texto_memorias = "[Erro ao buscar memórias]"
-
-    # Gerar resposta
+    
+    # 3. Gera a resposta do assistente
     with st.chat_message("assistant"):
         with st.spinner("Pensando..."):
             try:
                 client = Groq(api_key=str(api_key).strip())
+                
                 system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq.
                 
                 MEMÓRIAS SOBRE O USUÁRIO:
@@ -220,9 +252,11 @@ if chat_prompt:
                 )
                 bot_reply = chat_completion.choices[0].message.content
                 st.markdown(bot_reply)
+                
+                # 4. Salva a resposta
                 salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
                 
-                # Salvar interação na memória do Mem0
+                # 5. Salva a interação na memória do Mem0
                 try:
                     memory.add(
                         [
@@ -233,5 +267,6 @@ if chat_prompt:
                     )
                 except Exception as e:
                     st.warning(f"⚠️ Erro ao salvar memória: {e}")
+                
             except Exception as err:
                 st.error(f"⚠️ Erro: {err}")
