@@ -1,7 +1,10 @@
 import streamlit as st
 import sqlite3
-from letta_client import Letta
+from groq import Groq
+from duckduckgo_search import DDGS
+import pypdf
 import uuid
+import re
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖", layout="wide")
 
@@ -15,51 +18,7 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
-# --- CONEXÃO COM LETTA ---
-# Opção 1: Letta Cloud
-LETTA_API_KEY = st.secrets.get("LETTA_API_KEY")
-if LETTA_API_KEY:
-    client = Letta(token=LETTA_API_KEY)
-else:
-    # Opção 2: Self-hosted
-    client = Letta(base_url="http://localhost:8283")
-
-# --- BUSCAR OU CRIAR AGENTE ---
-# Usa o email do usuário como identificador do agente
-AGENT_NAME = f"agente-coder-{user_email.replace('@', '-')}"
-
-# Tenta encontrar um agente existente com este nome
-agentes = client.agents.list()
-agente_existente = None
-for a in agentes:
-    if a.name == AGENT_NAME:
-        agente_existente = a
-        break
-
-if agente_existente:
-    agent_id = agente_existente.id
-    st.sidebar.success(f"✅ Agente carregado! Memórias preservadas.")
-else:
-    # Cria um novo agente com blocos de memória
-    novo_agente = client.agents.create(
-        name=AGENT_NAME,
-        model="groq/llama-3.3-70b-versatile",  # Modelo gratuito da Groq
-        embedding="openai/text-embedding-3-small",  # Embedding para busca semântica
-        memory_blocks=[
-            {
-                "label": "persona",
-                "value": "Você é um assistente especialista em programação, chamado Agente Coder. Você é direto, útil e responde em português."
-            },
-            {
-                "label": "human",
-                "value": f"O usuário é {user_email}. Ainda não tenho informações sobre ele."
-            }
-        ]
-    )
-    agent_id = novo_agente.id
-    st.sidebar.info("🧠 Novo agente criado com memória persistente!")
-
-# --- BANCO DE DADOS LOCAL (para histórico de conversas) ---
+# --- BANCO DE DADOS COM MEMÓRIA ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
@@ -68,6 +27,8 @@ def init_db():
                   criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS memorias 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, fato TEXT, criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit()
     conn.close()
 
@@ -119,7 +80,70 @@ def deletar_conversa(chat_id):
     conn.commit()
     conn.close()
 
+# --- FUNÇÕES DE MEMÓRIA ---
+def salvar_memoria(email, fato):
+    if not fato or len(fato) < 3:
+        return
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO memorias (user_email, fato) VALUES (?, ?)", (email, fato))
+    conn.commit()
+    conn.close()
+
+def buscar_memorias(email, query, limit=3):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    # Busca simples por palavras-chave (para teste)
+    palavras = query.lower().split()
+    if not palavras:
+        return []
+    condicoes = " OR ".join(["fato LIKE ?" for _ in palavras])
+    params = [f"%{p}%" for p in palavras]
+    c.execute(f"SELECT fato FROM memorias WHERE user_email = ? AND ({condicoes}) ORDER BY criado_em DESC LIMIT ?", (email, *params, limit))
+    rows = c.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+# --- EXTRAÇÃO DE MEMÓRIAS COM REGEX (SEM LLM) ---
+def extrair_memorias_manual(texto, email):
+    """Extrai informações com regex e salva diretamente."""
+    salvou = False
+    # Nome
+    match = re.search(r"(?:meu nome é|eu sou|chamo-me|me chamo|sou o|sou a)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)", texto, re.IGNORECASE)
+    if match:
+        nome = match.group(1).strip()
+        if len(nome) > 2:
+            salvar_memoria(email, f"nome: {nome}")
+            st.toast(f"🧠 Memória salva: nome -> {nome}", icon="✅")
+            salvou = True
+    # Cidade
+    match = re.search(r"(?:moro em|sou de|resido em)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)", texto, re.IGNORECASE)
+    if match:
+        cidade = match.group(1).strip()
+        if len(cidade) > 2:
+            salvar_memoria(email, f"cidade: {cidade}")
+            st.toast(f"🧠 Memória salva: cidade -> {cidade}", icon="✅")
+            salvou = True
+    # Outros interesses (gosta de X)
+    match = re.search(r"(?:gosto|adoro|amo|curto)\s+(?:de\s+)?([A-Za-zÀ-ÖØ-öø-ÿ\s]{3,})", texto, re.IGNORECASE)
+    if match:
+        interesse = match.group(1).strip()
+        if len(interesse) > 2:
+            salvar_memoria(email, f"interesse: {interesse}")
+            st.toast(f"🧠 Memória salva: interesse -> {interesse}", icon="✅")
+            salvou = True
+    return salvou
+
 init_db()
+
+# --- VALIDAR GROQ API KEY ---
+api_key = st.secrets.get("GROQ_API_KEY")
+if not api_key:
+    st.error("GROQ_API_KEY não configurada nos Secrets.")
+    st.stop()
+
+# --- MODELO PRINCIPAL ---
+active_model = "openai/gpt-oss-120b"  # ou "llama-3.1-8b-instant"
 
 # --- GERENCIAMENTO DE SESSÃO ---
 if "active_chat_id" not in st.session_state:
@@ -150,19 +174,19 @@ with st.sidebar:
                     st.rerun()
     
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🧠 Memórias do Agente")
     
-    # --- MOSTRA AS MEMÓRIAS ATUAIS DO AGENTE ---
-    try:
-        # Busca os blocos de memória do agente
-        agent = client.agents.retrieve(agent_id)
-        for block in agent.memory_blocks:
-            if block.label == "human":
-                st.sidebar.info(f"👤 {block.value[:200]}...")
-            elif block.label == "persona":
-                st.sidebar.info(f"🤖 {block.value[:200]}...")
-    except Exception as e:
-        st.sidebar.warning("Não foi possível carregar as memórias.")
+    # Exibir memórias salvas
+    st.sidebar.subheader("🧠 Memórias")
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("SELECT fato FROM memorias WHERE user_email = ? ORDER BY criado_em DESC LIMIT 10", (user_email,))
+    memorias = c.fetchall()
+    conn.close()
+    if memorias:
+        for mem in memorias:
+            st.sidebar.write(f"- {mem[0]}")
+    else:
+        st.sidebar.info("Nenhuma memória salva ainda.")
     
     st.sidebar.markdown("---")
     st.sidebar.write(f"Conectado como: {user_email}")
@@ -183,45 +207,45 @@ for msg in messages:
 chat_prompt = st.chat_input("Digite sua mensagem...")
 
 if chat_prompt:
-    # Salva mensagem do usuário no histórico local
+    # Salvar mensagem do usuário
     salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
     atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
     
     with st.chat_message("user"):
         st.markdown(chat_prompt)
     
-    # --- ENVIA PARA O AGENTE LETTA ---
+    # --- EXTRAIR E SALVAR MEMÓRIAS (MANUALMENTE) ---
+    extrair_memorias_manual(chat_prompt, user_email)
+    
+    # Buscar memórias relevantes para a pergunta
+    memorias_relevantes = buscar_memorias(user_email, chat_prompt, limit=3)
+    texto_memorias = "\n".join([f"- {mem}" for mem in memorias_relevantes]) if memorias_relevantes else "Nenhuma memória relevante encontrada."
+    
+    # Gerar resposta
     with st.chat_message("assistant"):
-        with st.spinner("🧠 Processando com memória..."):
+        with st.spinner("Pensando..."):
             try:
-                # Envia a mensagem para o agente Letta
-                response = client.agents.messages.create(
-                    agent_id=agent_id,
-                    messages=[{"role": "user", "content": chat_prompt}]
+                client = Groq(api_key=str(api_key).strip())
+                
+                system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq.
+                
+                MEMÓRIAS SOBRE O USUÁRIO (extraídas automaticamente):
+                {texto_memorias}
+                
+                Use essas memórias para personalizar suas respostas. Seja natural e direto."""
+                
+                historico = carregar_historico_chat(st.session_state.active_chat_id)
+                messages_api = [{"role": "system", "content": system_prompt}] + historico
+                
+                chat_completion = client.chat.completions.create(
+                    model=active_model,
+                    messages=messages_api
                 )
-                
-                # Extrai a resposta do assistente
-                bot_reply = ""
-                for msg in response.messages:
-                    if hasattr(msg, "message_type") and msg.message_type == "assistant_message":
-                        bot_reply += getattr(msg, "content", "")
-                
+                bot_reply = chat_completion.choices[0].message.content
                 st.markdown(bot_reply)
                 
-                # Salva a resposta no histórico local
+                # Salvar resposta
                 salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
-                
-                # Mostra as memórias atualizadas (opcional)
-                with st.expander("🧠 Memórias atualizadas"):
-                    agent = client.agents.retrieve(agent_id)
-                    for block in agent.memory_blocks:
-                        if block.label == "human":
-                            st.write(f"**👤 Sobre você:** {block.value}")
-                        elif block.label == "persona":
-                            st.write(f"**🤖 Sobre o agente:** {block.value}")
                 
             except Exception as err:
                 st.error(f"⚠️ Erro: {err}")
-
-# --- MOSTRA O STATUS DA MEMÓRIA NO FINAL ---
-st.caption("🧠 Este agente tem memória persistente. Ele lembra de você entre conversas!")
