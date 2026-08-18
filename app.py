@@ -158,26 +158,25 @@ for msg in messages:
 chat_prompt = st.chat_input("Digite sua mensagem...")
 
 if chat_prompt:
+    # 1. Salva e exibe a mensagem do usuário imediatamente
     salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
     with st.chat_message("user"):
         st.markdown(chat_prompt)
 
+    # 2. Chama a Groq e exibe a resposta do assistente dentro do balão correto
     with st.chat_message("assistant"):
-        try:
-            client = Groq(api_key=str(api_key).strip())
-            
-            # Mostra um aviso visual de que está pensando
-            with st.spinner("Pensando..."):
-                response = client.completions.create if hasattr(client, 'completions') else None
-                # Chamada correta para chat da Groq
+        with st.spinner("Pensando..."):
+            try:
+                client = Groq(api_key=str(api_key).strip())
                 chat_completion = client.chat.completions.create(
                     model=active_model,
-                    messages=[{"role": "user", "content": chat_prompt}]
+                    messages=carregar_historico_chat(st.session_state.active_chat_id)
                 )
                 bot_reply = chat_completion.choices[0].message.content
-                
-            st.markdown(bot_reply)
-            salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
+                st.markdown(bot_reply)
+                salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
+            except Exception as err:
+                st.error(f"⚠️ Erro ao conectar com a Groq: {err}")
         except Exception as err:
             st.error(f"⚠️ Erro detalhado ao conectar com a Groq: {err}")
             
