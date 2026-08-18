@@ -1,3 +1,4 @@
+@'
 import streamlit as st
 import sqlite3
 from groq import Groq
@@ -5,11 +6,6 @@ from duckduckgo_search import DDGS
 import pypdf
 import uuid
 from mem0 import Memory
-import os
-
-# --- CONFIGURA OLLAMA PARA EMBEDDINGS ---
-# O Mem0 vai usar o Ollama para gerar embeddings localmente
-os.environ["OLLAMA_API_URL"] = "http://localhost:11434"  # URL padrão do Ollama
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖", layout="wide")
 
@@ -23,26 +19,24 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
-# --- CONFIGURAÇÃO DO MEM0 COM GROQ E OLLAMA ---
+# --- CONFIGURAÇÃO DO MEM0 COM GROQ E SENTENCE-TRANSFORMERS ---
 config = {
     "llm": {
         "provider": "groq",
         "config": {
-            "model": "llama-3.3-70b-versatile",  # Modelo que você já usa
+            "model": "llama3-70b-8192",  # modelo estável
             "temperature": 0.1,
             "max_tokens": 2000,
         }
     },
     "embedder": {
-        "provider": "ollama",
+        "provider": "sentence-transformers",
         "config": {
-            "model": "nomic-embed-text",  # Modelo de embedding local
-            "ollama_base_url": "http://localhost:11434",
+            "model": "all-MiniLM-L6-v2"
         }
     }
 }
 
-# Inicializa o Mem0 com a configuração
 memory = Memory.from_config(config)
 
 # --- BANCO DE DADOS (SQLite) ---
@@ -130,7 +124,7 @@ preferenciais = [
     "llama3-8b-8192",
     "gemma2-9b-it"
 ]
-active_model = preferenciais[0]  # Pode manter o que funciona melhor
+active_model = preferenciais[0]
 
 # --- GERENCIAMENTO DE SESSÃO ---
 if "active_chat_id" not in st.session_state:
@@ -254,3 +248,4 @@ if chat_prompt:
                 
             except Exception as err:
                 st.error(f"⚠️ Erro: {err}")
+'@ | Out-File -FilePath app.py -Encoding utf8
