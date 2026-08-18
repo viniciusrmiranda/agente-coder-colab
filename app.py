@@ -2,6 +2,7 @@
 import sqlite3
 from groq import Groq
 from duckduckgo_search import DDGS
+import pypdf
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖")
 
@@ -16,14 +17,28 @@ if not st.user.is_logged_in:
 user_email = st.user.email
 st.title(f"🤖 Olá, {user_email}!")
 
-# --- BANCO DE DADOS (SQLite) ---
+# --- BANCO DE DADOS (SQLite com Migração Automática) ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
+    
+    # Cria tabelas se não existirem
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, role TEXT, content TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS perfil 
                  (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))''')
+    
+    # Migração defensiva: adiciona a coluna user_email se a tabela antiga existir sem ela
+    try:
+        c.execute("ALTER TABLE historico ADD COLUMN user_email TEXT")
+    except sqlite3.OperationalError:
+        pass # Coluna já existe
+        
+    try:
+        c.execute("ALTER TABLE perfil ADD COLUMN user_email TEXT")
+    except sqlite3.OperationalError:
+        pass # Coluna já existe
+
     conn.commit()
     conn.close()
 
@@ -84,18 +99,26 @@ st.sidebar.write(f"Conectado como:\n**{user_email}**")
 if st.sidebar.button("🚪 Sair / Logout"):
     st.logout()
 
-# UPLOAD DE ARQUIVOS NA BARRA LATERAL
+# UPLOAD DE ARQUIVOS (INCLUINDO PDF)
 st.sidebar.subheader("📁 Anexar Arquivo")
-uploaded_file = st.sidebar.file_uploader("Envie um arquivo texto/código", type=["txt", "py", "json", "md", "csv"])
+uploaded_file = st.sidebar.file_uploader(
+    "Envie um arquivo (PDF, TXT, PY, JSON, MD, CSV)", 
+    type=["pdf", "txt", "py", "json", "md", "csv"]
+)
 
 file_content_context = ""
 if uploaded_file is not None:
     try:
-        file_text = uploaded_file.read().decode("utf-8")
-        file_content_context = f"\n\n--- Conteúdo do Arquivo Anexado ({uploaded_file.name}) ---\n{file_text}\n--- Fim do Arquivo ---"
-        st.sidebar.success(f"Arquivo '{uploaded_file.name}' carregado!")
+        if uploaded_file.name.endswith(".pdf"):
+            pdf_reader = pypdf.PdfReader(uploaded_file)
+            pdf_text = "\n".join([page.extract_text() or "" for page in pdf_reader.pages])
+            file_content_context = f"\n\n--- Conteúdo do PDF ({uploaded_file.name}) ---\n{pdf_text}\n--- Fim do PDF ---"
+        else:
+            file_text = uploaded_file.read().decode("utf-8")
+            file_content_context = f"\n\n--- Conteúdo do Arquivo ({uploaded_file.name}) ---\n{file_text}\n--- Fim do Arquivo ---"
+        st.sidebar.success(f"Arquivo '{uploaded_file.name}' carregado com sucesso!")
     except Exception as e:
-        st.sidebar.error(f"Erro ao ler arquivo: {e}")
+        st.sidebar.error(f"Erro ao processar arquivo: {e}")
 
 perfil_atual = carregar_perfil(user_email)
 if perfil_atual:
@@ -144,7 +167,7 @@ Perfil retido do usuário:
     for m in st.session_state.messages[-10:]:
         messages_payload.append({"role": m["role"], "content": m["content"]})
     
-    # Anexa o conteúdo do arquivo e da busca web à última mensagem do usuário
+    # Adiciona PDF/Arquivo e Busca à mensagem do usuário
     messages_payload[-1]["content"] += file_content_context + extra_context
 
     with st.chat_message("assistant"):

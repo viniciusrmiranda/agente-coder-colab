@@ -2,3 +2,4 @@
 groq
 duckduckgo-search
 authlib
+pypdf
