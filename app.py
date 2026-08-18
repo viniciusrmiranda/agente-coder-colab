@@ -19,35 +19,24 @@ user_email = st.user.email
 
 # --- BANCO DE DADOS (SQLite Avançado com Sessões) ---
 def init_db():
-
-    # --- AJUSTE RÁPIDO DO BANCO ---
-def ajustar_banco_automaticamente():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    # Verifica se a tabela já tem a estrutura correta (com user_email ou user_id)
-    # Se der erro ao ler a tabela, ele recria
-    try:
-        c.execute("SELECT * FROM perfil LIMIT 1")
-    except:
-        c.execute("DROP TABLE IF EXISTS perfil")
-        c.execute("CREATE TABLE perfil (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))")
-    conn.commit()
-    conn.close()
-
-ajustar_banco_automaticamente()
     
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
     # Tabela de sessões de conversa
     c.execute('''CREATE TABLE IF NOT EXISTS conversas 
                  (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
     # Tabela de histórico ligada ao chat_id
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
-    # Tabela de perfil
-    c.execute('''CREATE TABLE IF NOT EXISTS perfil 
-                 (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))''')
     
+    # Tabela de perfil (Com verificação automática de erro para evitar falhas de coluna)
+    try:
+        c.execute("SELECT user_email, chave, valor FROM perfil LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("DROP TABLE IF EXISTS perfil")
+        c.execute("CREATE TABLE perfil (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))")
+        
     conn.commit()
     conn.close()
 
@@ -102,10 +91,14 @@ def deletar_conversa(chat_id):
 def carregar_perfil(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
-    rows = c.fetchall()
-    conn.close()
-    return {r[0]: r[1] for r in rows}
+    try:
+        c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
+        rows = c.fetchall()
+        conn.close()
+        return {r[0]: r[1] for r in rows}
+    except sqlite3.OperationalError:
+        conn.close()
+        return {}
 
 init_db()
 
