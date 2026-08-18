@@ -125,17 +125,23 @@ def buscar_memorias(email, query, limit=3):
     resultados = []
     for id, fato, emb_json in rows:
         emb = np.array(json.loads(emb_json))
-        # Similaridade de cosseno
         sim = np.dot(query_embedding, emb) / (np.linalg.norm(query_embedding) * np.linalg.norm(emb) + 1e-8)
         resultados.append((sim, fato))
     
-    # Ordena por similaridade
     resultados.sort(key=lambda x: x[0], reverse=True)
     return [fato for _, fato in resultados[:limit]]
 
 # --- EXTRAÇÃO DE MEMÓRIAS USANDO GROQ ---
 def extrair_memorias_automatico(texto, email, api_key):
     """Usa o Groq para extrair fatos da mensagem do usuário."""
+    # Lista de modelos gratuitos para extração (fallback)
+    modelos_extracao = [
+        "openai/gpt-oss-20b",
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it"
+    ]
+    
     prompt = f"""
     Analise a mensagem do usuário abaixo e extraia fatos importantes sobre ele (nome, interesses, profissão, projetos, habilidades, etc.).
     Retorne APENAS uma lista de fatos, um por linha, sem numeração ou formatação extra.
@@ -143,34 +149,55 @@ def extrair_memorias_automatico(texto, email, api_key):
     
     Mensagem: "{texto}"
     """
-    try:
-        client = Groq(api_key=str(api_key).strip())
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",  # modelo leve para extração
-            messages=[{"role": "system", "content": "Você é um assistente especializado em extrair fatos de conversas."},
-                      {"role": "user", "content": prompt}],
-            temperature=0.3,
-        )
-        resultado = response.choices[0].message.content.strip()
-        if resultado and resultado != "NENHUM":
-            for linha in resultado.split('\n'):
-                fato = linha.strip()
-                if fato and len(fato) > 5:
-                    salvar_memoria(email, fato)
-                    st.toast(f"🧠 Memória salva: {fato[:50]}...", icon="✅")
-    except Exception as e:
-        pass  # Não quebra o app
+    
+    for model in modelos_extracao:
+        try:
+            client = Groq(api_key=str(api_key).strip())
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": "Você é um assistente especializado em extrair fatos de conversas."},
+                          {"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=200,
+            )
+            resultado = response.choices[0].message.content.strip()
+            if resultado and resultado != "NENHUM":
+                for linha in resultado.split('\n'):
+                    fato = linha.strip()
+                    if fato and len(fato) > 5:
+                        salvar_memoria(email, fato)
+                        st.toast(f"🧠 Memória salva: {fato[:50]}...", icon="✅")
+                return  # Sai após o primeiro sucesso
+        except Exception:
+            continue  # Tenta o próximo modelo
 
 init_db()
 
 # --- VALIDAR GROQ API KEY ---
 api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
-    st.error("GROQ_API_KEY não configurada nos Secrets.")
+    st.error("❌ GROQ_API_KEY não configurada nos Secrets do Streamlit.")
+    st.info("Por favor, configure sua chave de API da Groq em: Settings → Secrets → GROQ_API_KEY = 'sua_chave_aqui'")
     st.stop()
 
-# --- MODELO PRINCIPAL ---
-active_model = "qwen/qwen3-32b"
+# Testar a chave de API com uma chamada simples
+try:
+    test_client = Groq(api_key=str(api_key).strip())
+    test_client.models.list()  # Verifica se a chave é válida
+except Exception as e:
+    st.error(f"❌ Erro na chave de API da Groq: {e}")
+    st.info("Verifique se a chave está correta e ativa no console da Groq.")
+    st.stop()
+
+# --- MODELO PRINCIPAL (com fallback) ---
+modelos_principais = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.1-8b-instant",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it"
+]
+active_model = modelos_principais[0]  # Será substituído pelo primeiro que funcionar
 
 # --- GERENCIAMENTO DE SESSÃO ---
 if "active_chat_id" not in st.session_state:
@@ -216,7 +243,7 @@ with st.sidebar:
         st.sidebar.info("Nenhuma memória salva ainda.")
     
     st.sidebar.markdown("---")
-    st.sidebar.write(f"Conectado como: {user_email}")
+    st.sidebar.write(f"🔑 Conectado como: {user_email}")
     if st.sidebar.button("🚪 Sair"):
         st.logout()
 
@@ -248,31 +275,37 @@ if chat_prompt:
     memorias_relevantes = buscar_memorias(user_email, chat_prompt, limit=3)
     texto_memorias = "\n".join([f"- {mem}" for mem in memorias_relevantes]) if memorias_relevantes else "Nenhuma memória relevante encontrada."
     
-    # Gerar resposta
+    # Gerar resposta (tenta cada modelo até um funcionar)
     with st.chat_message("assistant"):
         with st.spinner("Pensando..."):
-            try:
-                client = Groq(api_key=str(api_key).strip())
-                
-                system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq.
-                
-                MEMÓRIAS SOBRE O USUÁRIO (extraídas automaticamente):
-                {texto_memorias}
-                
-                Use essas memórias para personalizar suas respostas. Seja natural e direto."""
-                
-                historico = carregar_historico_chat(st.session_state.active_chat_id)
-                messages_api = [{"role": "system", "content": system_prompt}] + historico
-                
-                chat_completion = client.chat.completions.create(
-                    model=active_model,
-                    messages=messages_api
-                )
-                bot_reply = chat_completion.choices[0].message.content
-                st.markdown(bot_reply)
-                
-                # Salvar resposta
-                salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
-                
-            except Exception as err:
-                st.error(f"⚠️ Erro: {err}")
+            resposta_gerada = False
+            for model in modelos_principais:
+                try:
+                    client = Groq(api_key=str(api_key).strip())
+                    
+                    system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo da Groq.
+                    
+                    MEMÓRIAS SOBRE O USUÁRIO (extraídas automaticamente):
+                    {texto_memorias}
+                    
+                    Use essas memórias para personalizar suas respostas. Seja natural e direto."""
+                    
+                    historico = carregar_historico_chat(st.session_state.active_chat_id)
+                    messages_api = [{"role": "system", "content": system_prompt}] + historico
+                    
+                    chat_completion = client.chat.completions.create(
+                        model=model,
+                        messages=messages_api
+                    )
+                    bot_reply = chat_completion.choices[0].message.content
+                    st.markdown(bot_reply)
+                    
+                    # Salvar resposta
+                    salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
+                    resposta_gerada = True
+                    break  # Sai do loop se funcionou
+                except Exception as err:
+                    continue  # Tenta o próximo modelo
+            
+            if not resposta_gerada:
+                st.error("⚠️ Nenhum modelo disponível funcionou. Verifique sua chave de API ou tente novamente mais tarde.")
