@@ -135,9 +135,6 @@ def carregar_perfil(email):
 def salvar_perfil(email, categoria, chave, valor):
     if not chave or not valor:
         return False
-    # Limpeza: se a chave for "cidade" e o valor for "mulheres", isso é um erro; vamos ignorar.
-    # Mas para não perder, vamos apenas salvar com a categoria correta.
-    # O ideal é que o LLM classifique corretamente.
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     c.execute(
@@ -191,24 +188,41 @@ def extrair_memorias_por_llm(historico_completo, email):
     
     Analise TODO o diálogo abaixo e identifique QUALQUER informação que o usuário compartilhou sobre si mesmo, sua família (filhos, cônjuges, pais, etc.), interesses, projetos, habilidades, preferências, localização, estudos, trabalho, estilo de escrita, áreas de atuação, etc.
     
-    **REGRAS IMPORTANTES:**
-    1. Considere como RELEVANTE absolutamente TUDO que o usuário disser sobre si mesmo ou sobre pessoas próximas. Nomes de filhos, idades, hobbies, etc. são extremamente importantes.
-    2. Classifique CADA informação na categoria mais apropriada:
-       - "Você" para informações pessoais (nome, idade, família, relacionamentos).
-       - "Tópicos" para assuntos de interesse geral.
-       - "Interesses" para hobbies e paixões.
-       - "Recent Work" para projetos recentes.
-       - "Skills" para habilidades técnicas.
-       - "Study" para estudos.
-       - "Writing Style" para estilo de escrita.
-       - "Áreas" para áreas de atuação.
-    3. NUNCA coloque informações pessoais (como "mulheres") na categoria "cidade". Cidade é apenas para localização geográfica.
-    4. Se o usuário mencionar algo vago como "gosto de mulheres", categorize como "Interesses" com chave "interesse" e valor "mulheres".
+    **REGRAS IMPORTANTES DE CATEGORIZAÇÃO:**
+    
+    1. **"Você"** → informações pessoais: nome, idade, cidade, estado civil, filhos, cônjuges, parentes. 
+       Exemplo: "nome: Vinícius", "cidade: São Paulo", "filho: José", "esposa: Maria".
+    
+    2. **"Interesses"** → hobbies, paixões, coisas que a pessoa gosta. 
+       Exemplo: "animais", "música", "filmes", "esportes".
+    
+    3. **"Tópicos"** → assuntos de interesse geral, não necessariamente hobbies. 
+       Exemplo: "programação", "inteligência artificial", "política".
+    
+    4. **"Recent Work"** → projetos recentes, trabalho atual. 
+       Exemplo: "projeto: automação de artigos", "empresa: XYZ".
+    
+    5. **"Skills"** → habilidades técnicas. 
+       Exemplo: "Python", "JavaScript", "machine learning".
+    
+    6. **"Study"** → estudos, cursos, formações. 
+       Exemplo: "Engenharia de Software", "Curso de Python".
+    
+    7. **"Writing Style"** → preferências de escrita. 
+       Exemplo: "gosta de respostas curtas", "prefere tom formal".
+    
+    8. **"Áreas"** → áreas de atuação. 
+       Exemplo: "desenvolvimento web", "análise de dados".
+    
+    **NUNCA** coloque "animais" ou "mulheres" na categoria "cidade" ou "Você". "Animais" é um interesse. "Mulheres" é um interesse ou tópico.
+    
+    Para cada informação, crie uma CHAVE descritiva e um VALOR.
+    Se a mesma categoria tiver múltiplas informações, use chaves diferentes (ex: "interesse_1", "interesse_2").
     
     Retorne APENAS um objeto JSON válido com a estrutura:
     {{
         "memorias": [
-            {{"categoria": "categoria", "chave": "chave_descritiva", "valor": "valor"}}
+            {{"categoria": "categoria", "chave": "chave_unica", "valor": "valor"}}
         ]
     }}
     Se não houver informações relevantes, retorne {{"memorias": []}}.
@@ -235,9 +249,22 @@ def extrair_memorias_por_llm(historico_completo, email):
             chave = mem.get("chave", "").strip()
             valor = mem.get("valor", "").strip()
             if chave and valor and categoria in categorias:
-                # CORREÇÃO: se categoria for "cidade" e valor for "mulheres", ignore (erro de classificação)
-                if categoria == "cidade" and valor.lower() in ["mulheres", "mulher"]:
-                    continue
+                # Garantir chave única dentro da categoria
+                if categoria == "Você" and chave in ["cidade", "nome", "filho", "esposa"]:
+                    # Mantém a chave original para essas informações principais
+                    pass
+                else:
+                    # Para outras, adiciona um sufixo numérico para evitar sobrescrita
+                    perfil_existente = carregar_perfil(email)
+                    if categoria in perfil_existente and chave in perfil_existente[categoria]:
+                        # Se a chave já existe, cria uma nova com sufixo
+                        contador = 1
+                        nova_chave = f"{chave}_{contador}"
+                        while categoria in perfil_existente and nova_chave in perfil_existente[categoria]:
+                            contador += 1
+                            nova_chave = f"{chave}_{contador}"
+                        chave = nova_chave
+                
                 if salvar_perfil(email, categoria, chave, valor):
                     salvou = True
                     st.toast(f"🧠 Memória salva: {chave} -> {valor}", icon="✅")
@@ -400,16 +427,16 @@ if st.session_state.pagina == "Chat":
                             texto_perfil += f"{chave}: {valor}\n"
                     
                     # IDENTIDADE CORRETA + COMPORTAMENTO
-                    system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq (não é GPT-4).
+                    system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq.
                     
                     Você se lembra das seguintes informações sobre o usuário (organizadas por categoria):
                     {texto_perfil if texto_perfil else "Nenhuma memória registrada ainda."}
                     
                     **INSTRUÇÕES DE COMPORTAMENTO:**
-                    1. Seja direto e conciso. Evite respostas longas desnecessárias.
-                    2. Se o usuário fizer uma afirmação vaga ou ambígua, PERGUNTE o que ele quer dizer ou como você pode ajudar, em vez de supor e dar explicações extensas.
-                    3. Use as memórias para personalizar, mas não fique repetindo informações que você já sabe.
-                    4. Se o usuário mencionar algo novo (como um filho, um interesse, etc.), anote mentalmente, mas não precisa fazer uma lista de tudo — apenas use para contextualizar futuras respostas.
+                    1. Use as memórias para entender o contexto do usuário. Se ele mencionar algo que já está nas memórias, apenas reconheça e siga em frente.
+                    2. Seja direto e conciso. Evite respostas longas desnecessárias.
+                    3. NÃO fique pedindo esclarecimento para coisas que o usuário já afirmou. Por exemplo, se ele disse "gosto de animais", não pergunte "sobre qual aspecto?" — apenas reconheça e pergunte se ele quer ajuda com algo relacionado.
+                    4. Se o usuário fizer uma afirmação vaga ou ambígua (ex: "Sabe do que gosto?"), você pode perguntar especificamente o que ele quer saber, mas depois que ele responder, aceite a resposta sem questionar.
                     5. Se perguntarem qual é o seu modelo, diga que você é baseado no {active_model} da Groq."""
                     
                     historico = carregar_historico_chat(st.session_state.active_chat_id)
