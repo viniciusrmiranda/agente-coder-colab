@@ -30,7 +30,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
     
-    # Tabela de perfil (Com verificação automática de erro para evitar falhas de coluna)
+    # Tabela de perfil
     try:
         c.execute("SELECT user_email, chave, valor FROM perfil LIMIT 1")
     except sqlite3.OperationalError:
@@ -88,18 +88,6 @@ def deletar_conversa(chat_id):
     conn.commit()
     conn.close()
 
-def carregar_perfil(email):
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
-    try:
-        c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
-        rows = c.fetchall()
-        conn.close()
-        return {r[0]: r[1] for r in rows}
-    except sqlite3.OperationalError:
-        conn.close()
-        return {}
-
 init_db()
 
 # --- VALIDAR GROQ API KEY E MODELO ---
@@ -108,7 +96,6 @@ if not api_key:
     st.error("GROQ_API_KEY não configurada nos Secrets.")
     st.stop()
 
-# Lista de modelos estáveis
 preferenciais = [
     "mixtral-8x7b-32768",
     "gemma2-9b-it",
@@ -158,26 +145,24 @@ for msg in messages:
 chat_prompt = st.chat_input("Digite sua mensagem...")
 
 if chat_prompt:
-    # 1. Salva e exibe a mensagem do usuário imediatamente
     salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
+    atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
+    
     with st.chat_message("user"):
         st.markdown(chat_prompt)
 
-    # 2. Chama a Groq e exibe a resposta do assistente dentro do balão correto
     with st.chat_message("assistant"):
         with st.spinner("Pensando..."):
             try:
                 client = Groq(api_key=str(api_key).strip())
+                historico_atual = carregar_historico_chat(st.session_state.active_chat_id)
+                
                 chat_completion = client.chat.completions.create(
                     model=active_model,
-                    messages=carregar_historico_chat(st.session_state.active_chat_id)
+                    messages=historico_atual
                 )
                 bot_reply = chat_completion.choices[0].message.content
                 st.markdown(bot_reply)
                 salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
             except Exception as err:
                 st.error(f"⚠️ Erro ao conectar com a Groq: {err}")
-        except Exception as err:
-            st.error(f"⚠️ Erro detalhado ao conectar com a Groq: {err}")
-            
-    st.rerun()
