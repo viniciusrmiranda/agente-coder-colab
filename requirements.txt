@@ -7,5 +7,5 @@ ollama
 mem0ai
 letta-client
 mem0ai
-
+letta-client==0.1.0
 sentence-transformers
