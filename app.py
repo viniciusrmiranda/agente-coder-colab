@@ -25,10 +25,17 @@ def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     
-    # Tabela conversas com coluna fixado
+    # Tabela conversas (cria se não existir)
     c.execute('''CREATE TABLE IF NOT EXISTS conversas 
                  (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
-                  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP, fixado INTEGER DEFAULT 0)''')
+                  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Adiciona coluna fixado se não existir (migração)
+    try:
+        c.execute("ALTER TABLE conversas ADD COLUMN fixado INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        # Coluna já existe, ignorar
+        pass
     
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
@@ -215,10 +222,8 @@ if "pagina" not in st.session_state:
 with st.sidebar:
     st.title("📋 Claude")
     
-    # Campo de busca
     busca = st.text_input("🔍 Buscar conversas", placeholder="Digite para filtrar...")
     
-    # Botão Nova Conversa
     if st.button("➕ Nova Conversa", use_container_width=True):
         novo_id = criar_nova_conversa(user_email)
         st.session_state.active_chat_id = novo_id
@@ -226,13 +231,11 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Listar conversas (com filtro)
     conversas = listar_conversas(user_email, busca if busca else None)
     
     if not conversas:
         st.info("Nenhuma conversa encontrada.")
     else:
-        # Separar fixadas e não fixadas
         fixadas = [c for c in conversas if c[2] == 1]
         nao_fixadas = [c for c in conversas if c[2] == 0]
         
@@ -280,7 +283,6 @@ with st.sidebar:
 
 # --- ÁREA PRINCIPAL ---
 if st.session_state.pagina == "Chat":
-    # Título com botão de três pontinhos (configurações)
     col_title, col_gear = st.columns([0.85, 0.15])
     with col_title:
         st.title("🤖 Agente Coder")
@@ -289,22 +291,18 @@ if st.session_state.pagina == "Chat":
             st.session_state.pagina = "Memoria"
             st.rerun()
     
-    # Se não houver conversa ativa, criar uma nova
     if not st.session_state.active_chat_id:
         st.session_state.active_chat_id = criar_nova_conversa(user_email)
         st.rerun()
     
-    # Exibir histórico da conversa atual
     messages = carregar_historico_chat(st.session_state.active_chat_id)
     for msg in messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
     
-    # Campo de entrada
     chat_prompt = st.chat_input("Digite sua mensagem...")
     
     if chat_prompt:
-        # Extrair memórias automaticamente (se for uma mensagem substancial)
         if len(chat_prompt) > 10:
             extrair_memorias_llm(chat_prompt, user_email)
         
@@ -319,7 +317,6 @@ if st.session_state.pagina == "Chat":
                 try:
                     client = Groq(api_key=str(api_key).strip())
                     
-                    # Carrega memórias organizadas
                     perfil = carregar_perfil(user_email)
                     texto_perfil = ""
                     for categoria, itens in perfil.items():
