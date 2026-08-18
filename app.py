@@ -5,7 +5,7 @@ from duckduckgo_search import DDGS
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖")
 
-# --- AUTENTICAÇÃO OFICIAL COM GOOGLE ---
+# --- AUTENTICAÇÃO COM GOOGLE ---
 if not st.user.is_logged_in:
     st.title("🤖 Agente Coder")
     st.write("Faça login com sua conta do Google para acessar a aplicação.")
@@ -13,11 +13,10 @@ if not st.user.is_logged_in:
         st.login("google")
     st.stop()
 
-# Recupera o e-mail retornado pela conta do Google
 user_email = st.user.email
 st.title(f"🤖 Olá, {user_email}!")
 
-# --- BANCO DE DADOS (SQLite com isolamento por e-mail) ---
+# --- BANCO DE DADOS (SQLite) ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
@@ -85,6 +84,19 @@ st.sidebar.write(f"Conectado como:\n**{user_email}**")
 if st.sidebar.button("🚪 Sair / Logout"):
     st.logout()
 
+# UPLOAD DE ARQUIVOS NA BARRA LATERAL
+st.sidebar.subheader("📁 Anexar Arquivo")
+uploaded_file = st.sidebar.file_uploader("Envie um arquivo texto/código", type=["txt", "py", "json", "md", "csv"])
+
+file_content_context = ""
+if uploaded_file is not None:
+    try:
+        file_text = uploaded_file.read().decode("utf-8")
+        file_content_context = f"\n\n--- Conteúdo do Arquivo Anexado ({uploaded_file.name}) ---\n{file_text}\n--- Fim do Arquivo ---"
+        st.sidebar.success(f"Arquivo '{uploaded_file.name}' carregado!")
+    except Exception as e:
+        st.sidebar.error(f"Erro ao ler arquivo: {e}")
+
 perfil_atual = carregar_perfil(user_email)
 if perfil_atual:
     st.sidebar.subheader("Memória Salva:")
@@ -104,13 +116,13 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if user_input := st.chat_input("Digite sua dúvida de programação..."):
+if user_input := st.chat_input("Digite sua mensagem..."):
     salvar_mensagem(user_email, "user", user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Busca Web Automática
+    # Busca Web
     extra_context = ""
     try:
         with DDGS() as ddgs:
@@ -132,7 +144,8 @@ Perfil retido do usuário:
     for m in st.session_state.messages[-10:]:
         messages_payload.append({"role": m["role"], "content": m["content"]})
     
-    messages_payload[-1]["content"] += extra_context
+    # Anexa o conteúdo do arquivo e da busca web à última mensagem do usuário
+    messages_payload[-1]["content"] += file_content_context + extra_context
 
     with st.chat_message("assistant"):
         try:
