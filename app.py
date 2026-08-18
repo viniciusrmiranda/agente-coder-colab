@@ -5,34 +5,31 @@ from duckduckgo_search import DDGS
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖")
 
-# --- LOGIN POR E-MAIL ---
-if "logged_user" not in st.session_state:
-    st.session_state.logged_user = None
-
-if not st.session_state.logged_user:
-    st.title("🤖 Agente Coder - Entrar")
-    st.write("Digite seu e-mail para acessar seu histórico e perfil de memória.")
-    
-    email_input = st.text_input("Seu e-mail (ex: usuario@gmail.com):")
-    if st.button("🔑 Entrar"):
-        if email_input and "@" in email_input:
-            st.session_state.logged_user = email_input.strip().lower()
-            st.rerun()
-        else:
-            st.warning("Insira um e-mail válido.")
+# --- AUTENTICAÇÃO COM GOOGLE ---
+if not st.experimental_user.is_logged_in:
+    st.title("🤖 Agente Coder")
+    st.write("Faça login com sua conta do Google para acessar o sistema.")
+    if st.button("🔑 Entrar com o Google"):
+        st.login("google")
     st.stop()
 
-user_email = st.session_state.logged_user
+# Recupera o email retornado pela conta Google
+user_email = st.experimental_user.email
 st.title(f"🤖 Olá, {user_email}!")
 
-# --- BANCO DE DADOS (SQLite) ---
+# --- BANCO DE DADOS (SQLite com tratamento de esquema) ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
+    
+    # Recria/ajusta tabela de historico
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, role TEXT, content TEXT)''')
+    
+    # Recria/ajusta tabela de perfil
     c.execute('''CREATE TABLE IF NOT EXISTS perfil 
                  (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))''')
+    
     conn.commit()
     conn.close()
 
@@ -46,25 +43,36 @@ def salvar_mensagem(email, role, content):
 def carregar_historico(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("SELECT role, content FROM historico WHERE user_email = ?", (email,))
-    rows = c.fetchall()
-    conn.close()
-    return [{"role": r[0], "content": r[1]} for r in rows]
+    try:
+        c.execute("SELECT role, content FROM historico WHERE user_email = ?", (email,))
+        rows = c.fetchall()
+        conn.close()
+        return [{"role": r[0], "content": r[1]} for r in rows]
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
 
 def carregar_perfil(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
-    rows = c.fetchall()
-    conn.close()
-    return {r[0]: r[1] for r in rows}
+    try:
+        c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
+        rows = c.fetchall()
+        conn.close()
+        return {r[0]: r[1] for r in rows}
+    except sqlite3.OperationalError:
+        conn.close()
+        return {}
 
 def limpar_memoria_usuario(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    c.execute("DELETE FROM historico WHERE user_email = ?", (email,))
-    c.execute("DELETE FROM perfil WHERE user_email = ?", (email,))
-    conn.commit()
+    try:
+        c.execute("DELETE FROM historico WHERE user_email = ?", (email,))
+        c.execute("DELETE FROM perfil WHERE user_email = ?", (email,))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
     conn.close()
 
 init_db()
@@ -72,17 +80,15 @@ init_db()
 # --- VALIDAR GROQ API KEY ---
 api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
-    st.error("GROQ_API_KEY não configurada nos Secrets do Streamlit.")
+    st.error("GROQ_API_KEY não configurada nos Secrets.")
     st.stop()
 
 # --- BARRA LATERAL ---
-st.sidebar.title("👤 Conta")
-st.sidebar.write(f"Usuário: **{user_email}**")
+st.sidebar.title("👤 Conta Google")
+st.sidebar.write(f"Conectado como:\n**{user_email}**")
 
-if st.sidebar.button("🚪 Sair"):
-    st.session_state.logged_user = None
-    st.session_state.messages = []
-    st.rerun()
+if st.sidebar.button("🚪 Sair / Logout"):
+    st.logout()
 
 perfil_atual = carregar_perfil(user_email)
 if perfil_atual:
@@ -109,7 +115,7 @@ if user_input := st.chat_input("Digite sua dúvida de programação..."):
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Busca na Web
+    # Busca Web
     extra_context = ""
     try:
         with DDGS() as ddgs:
@@ -123,7 +129,7 @@ if user_input := st.chat_input("Digite sua dúvida de programação..."):
     texto_perfil = "\n".join([f"{k}: {v}" for k, v in fatos_perfil.items()]) if fatos_perfil else "Sem preferências registradas."
 
     system_prompt = f"""Você é um assistente especialista em código.
-Usuário atual: {user_email}
+Usuário logado via Google: {user_email}
 Perfil retido do usuário:
 {texto_perfil}"""
 
