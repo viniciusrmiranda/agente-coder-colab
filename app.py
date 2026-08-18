@@ -170,7 +170,7 @@ if not api_key:
     st.stop()
 
 # --- MODELO PRINCIPAL ---
-active_model = "llama3-70b-8192"
+active_model = "llama-3.3-70b-versatile"
 
 # --- GERENCIAMENTO DE SESSÃO ---
 if "active_chat_id" not in st.session_state:
