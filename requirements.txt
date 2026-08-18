@@ -5,7 +5,7 @@ authlib
 pypdf
 ollama
 mem0ai
-
+letta-client
 mem0ai
 
 sentence-transformers
