@@ -97,10 +97,11 @@ if not api_key:
     st.stop()
 
 preferenciais = [
-    "mixtral-8x7b-32768",
-    "gemma2-9b-it",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama3-70b-8192",
     "llama3-8b-8192",
-    "llama3-70b-8192"
+    "gemma2-9b-it"
 ]
 active_model = preferenciais[0]
 
