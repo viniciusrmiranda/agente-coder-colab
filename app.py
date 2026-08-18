@@ -3,10 +3,14 @@ from groq import Groq
 from duckduckgo_search import DDGS
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖")
-st.title("🤖 Agente Coder - Chat & Busca Web")
+st.title("🤖 Agente Coder - Chat com Busca Web Automática")
 
-api_key = st.sidebar.text_input("Cole sua API Key da Groq:", type="password")
-enable_web = st.sidebar.checkbox("Ativar Busca na Web (DuckDuckGo)")
+# Puxa a chave dos Secrets do Streamlit de forma segura
+api_key = st.secrets.get("GROQ_API_KEY")
+
+if not api_key:
+    st.error("Chave GROQ_API_KEY não configurada nos Secrets do Streamlit.")
+    st.stop()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -16,27 +20,24 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 if user_input := st.chat_input("Digite sua dúvida ou código..."):
-    if not api_key:
-        st.error("Insira sua chave de API da Groq na barra lateral para continuar.")
-        st.stop()
-
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.markdown(user_input)
 
+    # Busca Web Automática em tempo real para TODA mensagem
     extra_context = ""
-    if enable_web:
-        try:
-            with DDGS() as ddgs:
-                results = [f"- {r['title']}: {r['body']}" for r in ddgs.text(user_input, max_results=3)]
-                extra_context = "\n\n--- Busca Web ---\n" + "\n".join(results)
-        except Exception as e:
-            extra_context = f"\n[Erro na busca web: {e}]"
+    try:
+        with DDGS() as ddgs:
+            results = [f"- {r['title']}: {r['body']}" for r in ddgs.text(user_input, max_results=3)]
+            if results:
+                extra_context = "\n\n--- Resultados da Busca na Web em Tempo Real ---\n" + "\n".join(results)
+    except Exception as e:
+        extra_context = f"\n[Busca na web temporariamente indisponível: {e}]"
 
     client = Groq(api_key=api_key)
     prompt_completo = user_input + extra_context
     
-    messages_payload = [{"role": "system", "content": "Você é um assistente especialista em programação."}]
+    messages_payload = [{"role": "system", "content": "Você é um assistente especialista em programação com acesso à internet em tempo real."}]
     for m in st.session_state.messages[:-1]:
         messages_payload.append({"role": m["role"], "content": m["content"]})
     messages_payload.append({"role": "user", "content": prompt_completo})
