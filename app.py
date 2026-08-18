@@ -170,7 +170,7 @@ Perfil retido do usuário:
         try:
             client = Groq(api_key=str(api_key).strip())
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=messages_payload
             )
             bot_reply = response.choices[0].message.content
