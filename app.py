@@ -31,12 +31,6 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS perfil 
                  (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))''')
     
-    # Migrações caso colunas não existam
-    try:
-        c.execute("ALTER TABLE historico ADD COLUMN chat_id TEXT")
-    except sqlite3.OperationalError:
-        pass
-
     conn.commit()
     conn.close()
 
@@ -91,14 +85,10 @@ def deletar_conversa(chat_id):
 def carregar_perfil(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    try:
-        c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
-        rows = c.fetchall()
-        conn.close()
-        return {r[0]: r[1] for r in rows}
-    except sqlite3.OperationalError:
-        conn.close()
-        return {}
+    c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
+    rows = c.fetchall()
+    conn.close()
+    return {r[0]: r[1] for r in rows}
 
 init_db()
 
@@ -108,28 +98,14 @@ if not api_key:
     st.error("GROQ_API_KEY não configurada nos Secrets.")
     st.stop()
 
-@st.cache_data(ttl=3600)
-def obter_modelo_ativo(key):
-    try:
-        client = Groq(api_key=key.strip())
-        models_page = client.models.list()
-        model_ids = [m.id for m in models_page.data]
-        
-        preferenciais = [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "mixtral-8x7b-32768",
-            "gemma2-9b-it"
-        ]
-        
-        for p in preferenciais:
-            if p in model_ids:
-                return p
-        return model_ids[0] if model_ids else "llama-3.1-8b-instant"
-    except Exception:
-        return "llama-3.1-8b-instant"
-
-active_model = obter_modelo_ativo(str(api_key))
+# Lista de modelos estáveis
+preferenciais = [
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+    "llama3-8b-8192",
+    "llama3-70b-8192"
+]
+active_model = preferenciais[0]
 
 # --- GERENCIAMENTO DE SESSÃO DO CHAT ---
 conversas_usuario = listar_conversas(user_email)
@@ -140,17 +116,13 @@ if "active_chat_id" not in st.session_state or not st.session_state.active_chat_
     else:
         st.session_state.active_chat_id = criar_nova_conversa(user_email)
 
-# --- BARRA LATERAL (HISTÓRICO ESTILO CHATGPT) ---
+# --- BARRA LATERAL ---
 st.sidebar.title("💬 Conversas")
-
 if st.sidebar.button("➕ Nova Conversa", use_container_width=True):
     novo_id = criar_nova_conversa(user_email)
     st.session_state.active_chat_id = novo_id
     st.rerun()
 
-st.sidebar.markdown("---")
-
-# Lista histórico de conversas
 for cid, titulo in conversas_usuario:
     col1, col2 = st.sidebar.columns([0.8, 0.2])
     label = f"📌 {titulo}" if cid == st.session_state.active_chat_id else titulo
@@ -159,118 +131,37 @@ for cid, titulo in conversas_usuario:
         st.rerun()
     if col2.button("🗑️", key=f"del_{cid}"):
         deletar_conversa(cid)
-        st.session_state.active_chat_id = None
         st.rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.write(f"Conectado como:\n**{user_email}**")
-st.sidebar.caption(f"🤖 Modelo Groq: {active_model}")
-
-if st.sidebar.button("🚪 Sair / Logout"):
+if st.sidebar.button("🚪 Sair"):
     st.logout()
 
-# --- ÁREA PRINCIPAL DO CHAT ---
+# --- ÁREA PRINCIPAL ---
 st.title("🤖 Agente Coder")
-
-# Carrega histórico da conversa ativa
 messages = carregar_historico_chat(st.session_state.active_chat_id)
 
 for msg in messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# --- CAMPO DE CHAT COM ANEXO INTEGRADO (+ BOTÃO IGUAL CHATGPT) ---
-MAX_CHARACTERS = 12000
-
-# accept_file permite anexar arquivos diretamente na barra de texto
-chat_prompt = st.chat_input(
-    "Digite sua mensagem...",
-    accept_file="multiple",
-    file_type=["pdf", "txt", "py", "json", "md", "csv"]
-)
+chat_prompt = st.chat_input("Digite sua mensagem...")
 
 if chat_prompt:
-    user_input = chat_prompt.text or ""
-    uploaded_files = chat_prompt.files or []
-
-    # Atualiza o título da conversa na primeira mensagem
-    if len(messages) == 0 and user_input:
-        atualizar_titulo_conversa(st.session_state.active_chat_id, user_input)
-
-    file_content_context = ""
-    nomer_arquivos_display = []
-
-    # Processa os arquivos anexados pelo botão '+' do chat
-    for uploaded_file in uploaded_files:
-        nomer_arquivos_display.append(uploaded_file.name)
-        try:
-            if uploaded_file.name.endswith(".pdf"):
-                pdf_reader = pypdf.PdfReader(uploaded_file)
-                pdf_text = "\n".join([page.extract_text() or "" for page in pdf_reader.pages])
-                if len(pdf_text) > MAX_CHARACTERS:
-                    pdf_text = pdf_text[:MAX_CHARACTERS] + "\n\n[...Texto resumido...]"
-                file_content_context += f"\n\n--- Anexo: {uploaded_file.name} ---\n{pdf_text}\n--- Fim do Anexo ---"
-            else:
-                file_text = uploaded_file.read().decode("utf-8")
-                if len(file_text) > MAX_CHARACTERS:
-                    file_text = file_text[:MAX_CHARACTERS] + "\n\n[...Texto resumido...]"
-                file_content_context += f"\n\n--- Anexo: {uploaded_file.name} ---\n{file_text}\n--- Fim do Anexo ---"
-        except Exception as e:
-            st.error(f"Erro ao ler arquivo {uploaded_file.name}: {e}")
-
-    # Monta a exibição na tela do chat
-    user_display = user_input
-    if nomer_arquivos_display:
-        anexos_str = ", ".join(nomer_arquivos_display)
-        user_display = f"📄 *Anexo(s): {anexos_str}*\n\n" + (user_input if user_input else "Analisar arquivo enviado.")
-
-    salvar_mensagem(st.session_state.active_chat_id, user_email, "user", user_display)
+    salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
     with st.chat_message("user"):
-        st.markdown(user_display)
-
-    # Busca Web
-    extra_context = ""
-    if user_input:
-        try:
-            with DDGS() as ddgs:
-                results = [f"- {r['title']}: {r['body']}" for r in ddgs.text(user_input, max_results=3)]
-                if results:
-                    extra_context = "\n\n--- Resultados de Pesquisa ---\n" + "\n".join(results)
-        except Exception as e:
-            extra_context = f"\n[Busca indisponível: {e}]"
-
-    fatos_perfil = carregar_perfil(user_email)
-    texto_perfil = "\n".join([f"{k}: {v}" for k, v in fatos_perfil.items()]) if fatos_perfil else "Sem preferências registradas."
-
-    system_prompt = f"""Você é um assistente especialista em código.
-Usuário logado via Google: {user_email}
-Perfil retido do usuário:
-{texto_perfil}"""
-
-    # Carrega histórico atualizado
-    history_messages = carregar_historico_chat(st.session_state.active_chat_id)
-    messages_payload = [{"role": "system", "content": system_prompt}]
-    
-    for m in history_messages[-6:]:
-        messages_payload.append({"role": m["role"], "content": m["content"]})
-    
-    # Injeta conteúdo do arquivo e busca na mensagem
-    if file_content_context:
-        messages_payload[-1]["content"] += file_content_context
-    if extra_context:
-        messages_payload[-1]["content"] += extra_context
+        st.markdown(chat_prompt)
 
     with st.chat_message("assistant"):
         try:
             client = Groq(api_key=str(api_key).strip())
             response = client.chat.completions.create(
                 model=active_model,
-                messages=messages_payload
+                messages=[{"role": "user", "content": chat_prompt}]
             )
             bot_reply = response.choices[0].message.content
             st.markdown(bot_reply)
             salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
         except Exception as err:
-            st.error(f"Erro ao processar mensagem na Groq: {err}")
-
+            st.error(f"Erro: {err}")
     st.rerun()
