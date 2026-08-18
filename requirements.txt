@@ -3,3 +3,9 @@ groq
 duckduckgo-search
 authlib
 pypdf
+
+mem0ai
+
+mem0ai
+
+sentence-transformers
