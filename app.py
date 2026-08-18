@@ -22,22 +22,20 @@ def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     
-    # Cria tabelas se não existirem
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, role TEXT, content TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS perfil 
                  (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))''')
     
-    # Migração defensiva: adiciona a coluna user_email se a tabela antiga existir sem ela
     try:
         c.execute("ALTER TABLE historico ADD COLUMN user_email TEXT")
     except sqlite3.OperationalError:
-        pass # Coluna já existe
+        pass
         
     try:
         c.execute("ALTER TABLE perfil ADD COLUMN user_email TEXT")
     except sqlite3.OperationalError:
-        pass # Coluna já existe
+        pass
 
     conn.commit()
     conn.close()
@@ -99,7 +97,7 @@ st.sidebar.write(f"Conectado como:\n**{user_email}**")
 if st.sidebar.button("🚪 Sair / Logout"):
     st.logout()
 
-# UPLOAD DE ARQUIVOS (INCLUINDO PDF)
+# UPLOAD DE ARQUIVOS
 st.sidebar.subheader("📁 Anexar Arquivo")
 uploaded_file = st.sidebar.file_uploader(
     "Envie um arquivo (PDF, TXT, PY, JSON, MD, CSV)", 
@@ -167,14 +165,13 @@ Perfil retido do usuário:
     for m in st.session_state.messages[-10:]:
         messages_payload.append({"role": m["role"], "content": m["content"]})
     
-    # Adiciona PDF/Arquivo e Busca à mensagem do usuário
     messages_payload[-1]["content"] += file_content_context + extra_context
 
     with st.chat_message("assistant"):
         try:
             client = Groq(api_key=str(api_key).strip())
             response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.1-70b-versatile",
                 messages=messages_payload
             )
             bot_reply = response.choices[0].message.content
