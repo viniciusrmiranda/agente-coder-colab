@@ -90,6 +90,52 @@ def deletar_conversa(chat_id):
 
 init_db()
 
+# ========== FUNÇÕES DE PERFIL ==========
+def carregar_perfil(email):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    try:
+        c.execute("SELECT chave, valor FROM perfil WHERE user_email = ?", (email,))
+        rows = c.fetchall()
+        conn.close()
+        return {r[0]: r[1] for r in rows}
+    except sqlite3.OperationalError:
+        conn.close()
+        return {}
+
+def salvar_perfil(email, chave, valor):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO perfil (user_email, chave, valor) VALUES (?, ?, ?)",
+        (email, chave.strip(), valor.strip())
+    )
+    conn.commit()
+    conn.close()
+
+def deletar_memoria(email, chave):
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM perfil WHERE user_email = ? AND chave = ?", (email, chave))
+    conn.commit()
+    conn.close()
+
+import re
+
+def extrair_memorias(texto, email):
+    """Identifica e salva automaticamente memórias a partir do texto."""
+    padroes = {
+        "nome": r"(?:meu nome é|eu sou|chamo-me|me chamo)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
+        "cidade": r"(?:moro em|sou de|resido em)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
+        "profissão": r"(?:sou|trabalho como|atualmente sou)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:desenvolvedor|engenheiro|analista|designer|gerente|estudante|professor))",
+    }
+    for chave, padrao in padroes.items():
+        match = re.search(padrao, texto, re.IGNORECASE)
+        if match:
+            valor = match.group(1).strip()
+            if len(valor) > 2:
+                salvar_perfil(email, chave, valor)
+
 # --- VALIDAR GROQ API KEY E MODELO ---
 api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
@@ -132,8 +178,32 @@ for cid, titulo in conversas_usuario:
         st.rerun()
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("🧠 Memórias")
+
+perfil_atual = carregar_perfil(user_email)
+if perfil_atual:
+    for chave, valor in perfil_atual.items():
+        col1, col2 = st.sidebar.columns([0.7, 0.3])
+        col1.write(f"**{chave}:** {valor}")
+        if col2.button("🗑️", key=f"del_mem_{chave}"):
+            deletar_memoria(user_email, chave)
+            st.rerun()
+else:
+    st.sidebar.info("Nenhuma memória salva ainda.")
+
+# Adicionar nova memória manualmente
+with st.sidebar.expander("➕ Adicionar memória"):
+    nova_chave = st.text_input("Chave (ex: nome)")
+    novo_valor = st.text_input("Valor")
+    if st.button("Salvar memória"):
+        if nova_chave and novo_valor:
+            salvar_perfil(user_email, nova_chave, novo_valor)
+            st.rerun()
+
+st.sidebar.markdown("---")
 if st.sidebar.button("🚪 Sair"):
     st.logout()
+   
 
 # --- ÁREA PRINCIPAL ---
 st.title("🤖 Agente Coder")
@@ -146,6 +216,9 @@ for msg in messages:
 chat_prompt = st.chat_input("Digite sua mensagem...")
 
 if chat_prompt:
+    # Extrai e salva memórias automaticamente
+    extrair_memorias(chat_prompt, user_email)
+    
     salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
     atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
     
@@ -156,11 +229,27 @@ if chat_prompt:
         with st.spinner("Pensando..."):
             try:
                 client = Groq(api_key=str(api_key).strip())
-                historico_atual = carregar_historico_chat(st.session_state.active_chat_id)
+                
+                # Carrega memórias
+                perfil = carregar_perfil(user_email)
+                texto_perfil = "\n".join([f"{k}: {v}" for k, v in perfil.items()]) if perfil else "Nenhuma memória registrada."
+                
+                # Monta o system_prompt
+                system_prompt = f"""Você é um assistente especialista em programação.
+Você se lembra das seguintes informações sobre o usuário:
+{texto_perfil}
+
+Use essas informações para personalizar suas respostas."""
+                
+                # Carrega histórico da conversa atual
+                historico = carregar_historico_chat(st.session_state.active_chat_id)
+                
+                # Constrói a lista de mensagens para a API
+                messages = [{"role": "system", "content": system_prompt}] + historico
                 
                 chat_completion = client.chat.completions.create(
                     model=active_model,
-                    messages=historico_atual
+                    messages=messages
                 )
                 bot_reply = chat_completion.choices[0].message.content
                 st.markdown(bot_reply)
