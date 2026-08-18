@@ -19,6 +19,23 @@ user_email = st.user.email
 
 # --- BANCO DE DADOS (SQLite Avançado com Sessões) ---
 def init_db():
+
+    # --- AJUSTE RÁPIDO DO BANCO ---
+def ajustar_banco_automaticamente():
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    # Verifica se a tabela já tem a estrutura correta (com user_email ou user_id)
+    # Se der erro ao ler a tabela, ele recria
+    try:
+        c.execute("SELECT * FROM perfil LIMIT 1")
+    except:
+        c.execute("DROP TABLE IF EXISTS perfil")
+        c.execute("CREATE TABLE perfil (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))")
+    conn.commit()
+    conn.close()
+
+ajustar_banco_automaticamente()
+    
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     # Tabela de sessões de conversa
