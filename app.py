@@ -25,12 +25,12 @@ def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     
-    # Tabela conversas (com migração para adicionar coluna fixado se não existir)
+    # Tabela conversas com migração para fixado
     c.execute('''CREATE TABLE IF NOT EXISTS conversas 
                  (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
                   criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # Verifica se a coluna fixado existe, senão adiciona
+    # Adiciona coluna fixado se não existir
     c.execute("PRAGMA table_info(conversas)")
     colunas = [col[1] for col in c.fetchall()]
     if "fixado" not in colunas:
@@ -228,7 +228,7 @@ with st.sidebar:
     if st.button("➕ Nova Conversa", use_container_width=True):
         novo_id = criar_nova_conversa(user_email)
         st.session_state.active_chat_id = novo_id
-        st.session_state.pagina = "Chat"  # Volta para o chat ao criar nova conversa
+        st.session_state.pagina = "Chat"
         st.rerun()
     
     st.markdown("---")
@@ -289,14 +289,17 @@ with st.sidebar:
 
 # --- ÁREA PRINCIPAL ---
 if st.session_state.pagina == "Chat":
-    # Título com botão de engrenagem (acesso à memória)
-    col_title, col_gear = st.columns([0.85, 0.15])
+    # Título com botão de três pontinhos (⋮) que abre popover
+    col_title, col_menu = st.columns([0.8, 0.2])
     with col_title:
         st.title("🤖 Agente Coder")
-    with col_gear:
-        if st.button("⚙️", help="Configurações de memória"):
-            st.session_state.pagina = "Memoria"
-            st.rerun()
+    with col_menu:
+        # Criamos um popover com o botão de três pontinhos
+        with st.popover("⋮"):
+            if st.button("🧠 Memória", use_container_width=True):
+                st.session_state.pagina = "Memoria"
+                st.rerun()
+            # Você pode adicionar outras opções aqui futuramente
     
     # Se não houver conversa ativa, criar uma nova
     if not st.session_state.active_chat_id:
