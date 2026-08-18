@@ -83,20 +83,51 @@ def limpar_memoria_usuario(email):
 
 init_db()
 
-# --- VALIDAR GROQ API KEY ---
+# --- VALIDAR GROQ API KEY E OBTER MODELO ATIVO ---
 api_key = st.secrets.get("GROQ_API_KEY")
 if not api_key:
     st.error("GROQ_API_KEY não configurada nos Secrets.")
     st.stop()
 
+@st.cache_data(ttl=3600)
+def obter_modelo_ativo(key):
+    """Consulta os modelos ativos diretamente na API da Groq para evitar erros de depreciação."""
+    try:
+        client = Groq(api_key=key.strip())
+        models_page = client.models.list()
+        # Filtra modelos ativos comuns
+        model_ids = [m.id for m in models_page.data]
+        
+        # Lista de preferência por ordem de prioridade
+        preferenciais = [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "llama3-8b-8192",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it"
+        ]
+        
+        for p in preferenciais:
+            if p in model_ids:
+                return p
+        
+        # Se nenhum preferencial for encontrado, retorna o primeiro modelo disponível
+        return model_ids[0] if model_ids else "llama-3.1-8b-instant"
+    except Exception:
+        # Fallback padrão leve
+        return "llama-3.1-8b-instant"
+
+active_model = obter_modelo_ativo(str(api_key))
+
 # --- BARRA LATERAL ---
 st.sidebar.title("👤 Conta Google")
 st.sidebar.write(f"Conectado como:\n**{user_email}**")
+st.sidebar.caption(f"🤖 Modelo Groq em uso: {active_model}")
 
 if st.sidebar.button("🚪 Sair / Logout"):
     st.logout()
 
-# UPLOAD DE ARQUIVOS COM TRUNCAGEM DE TOKENS
+# UPLOAD DE ARQUIVOS COM TRUNCAGEM
 st.sidebar.subheader("📁 Anexar Arquivo")
 uploaded_file = st.sidebar.file_uploader(
     "Envie um arquivo (PDF, TXT, PY, JSON, MD, CSV)", 
@@ -176,9 +207,9 @@ Perfil retido do usuário:
         try:
             client = Groq(api_key=str(api_key).strip())
             
-            # Chama o modelo llama3-70b-8192
+            # Utiliza o modelo retornado dinamicamente pela API
             response = client.chat.completions.create(
-                model="llama3-70b-8192",
+                model=active_model,
                 messages=messages_payload
             )
             bot_reply = response.choices[0].message.content
