@@ -25,12 +25,10 @@ def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     
-    # Tabela conversas com migração para fixado
+    # Tabela conversas com migração para coluna fixado
     c.execute('''CREATE TABLE IF NOT EXISTS conversas 
                  (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
                   criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    # Adiciona coluna fixado se não existir
     c.execute("PRAGMA table_info(conversas)")
     colunas = [col[1] for col in c.fetchall()]
     if "fixado" not in colunas:
@@ -39,7 +37,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
     
-    # Tabela de perfil com categoria e timestamp
+    # Tabela de perfil
     try:
         c.execute("SELECT user_email, categoria, chave, valor FROM perfil LIMIT 1")
     except sqlite3.OperationalError:
@@ -55,7 +53,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- FUNÇÕES DE CONVERSA (com fixado) ---
+# --- FUNÇÕES DE CONVERSA ---
 def listar_conversas(email, filtro=None):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
@@ -117,7 +115,7 @@ def carregar_historico_chat(chat_id):
     conn.close()
     return [{"role": r[0], "content": r[1]} for r in rows]
 
-# --- FUNÇÕES DE PERFIL (com categoria) ---
+# --- FUNÇÕES DE PERFIL ---
 def carregar_perfil(email):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
@@ -136,6 +134,8 @@ def carregar_perfil(email):
         return {}
 
 def salvar_perfil(email, categoria, chave, valor):
+    if not chave or not valor:
+        return
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     c.execute(
@@ -152,11 +152,19 @@ def deletar_memoria(email, categoria, chave):
     conn.commit()
     conn.close()
 
-# --- EXTRAÇÃO AUTOMÁTICA COM LLM ---
+# --- EXTRAÇÃO AUTOMÁTICA COM LLM + FALLBACK ---
+def extrair_memorias(texto, email):
+    """Tenta extrair com LLM, se falhar usa regex."""
+    # Primeiro, tenta extração via LLM
+    sucesso = extrair_memorias_llm(texto, email)
+    if not sucesso:
+        # Fallback: regex simples
+        extrair_memorias_regex(texto, email)
+
 def extrair_memorias_llm(texto, email):
     api_key = st.secrets.get("GROQ_API_KEY")
     if not api_key:
-        return
+        return False
     
     categorias_possiveis = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
     
@@ -189,8 +197,23 @@ def extrair_memorias_llm(texto, email):
             valor = mem.get("valor", "").strip()
             if chave and valor and categoria in categorias_possiveis:
                 salvar_perfil(email, categoria, chave, valor)
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        return False
+
+def extrair_memorias_regex(texto, email):
+    """Fallback usando regex para capturar nome, cidade, profissão."""
+    padroes = {
+        "nome": r"(?:meu nome é|eu sou|chamo-me|me chamo)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
+        "cidade": r"(?:moro em|sou de|resido em)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
+        "profissão": r"(?:sou|trabalho como|atualmente sou)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:desenvolvedor|engenheiro|analista|designer|gerente|estudante|professor))",
+    }
+    for chave, padrao in padroes.items():
+        match = re.search(padrao, texto, re.IGNORECASE)
+        if match:
+            valor = match.group(1).strip()
+            if len(valor) > 2:
+                salvar_perfil(email, "Você", chave, valor)
 
 init_db()
 
@@ -210,21 +233,19 @@ preferenciais = [
 ]
 active_model = preferenciais[0]
 
-# --- GERENCIAMENTO DE SESSÃO DO CHAT ---
+# --- GERENCIAMENTO DE SESSÃO ---
 if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = None
 
 if "pagina" not in st.session_state:
-    st.session_state.pagina = "Chat"  # "Chat" ou "Memoria"
+    st.session_state.pagina = "Chat"
 
 # --- SIDEBAR (ESTILO CLAUDE) ---
 with st.sidebar:
     st.title("📋 Claude")
     
-    # Campo de busca
     busca = st.text_input("🔍 Buscar conversas", placeholder="Digite para filtrar...", key="search_input")
     
-    # Botão Nova Conversa
     if st.button("➕ Nova Conversa", use_container_width=True):
         novo_id = criar_nova_conversa(user_email)
         st.session_state.active_chat_id = novo_id
@@ -233,13 +254,11 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Listar conversas (com filtro)
     conversas = listar_conversas(user_email, busca if busca else None)
     
     if not conversas:
         st.info("Nenhuma conversa encontrada.")
     else:
-        # Separar fixadas e não fixadas
         fixadas = [c for c in conversas if c[2] == 1]
         nao_fixadas = [c for c in conversas if c[2] == 0]
         
@@ -289,36 +308,29 @@ with st.sidebar:
 
 # --- ÁREA PRINCIPAL ---
 if st.session_state.pagina == "Chat":
-    # Título com botão de três pontinhos (⋮) que abre popover
-    col_title, col_menu = st.columns([0.8, 0.2])
+    # Cabeçalho com botão de três pontinhos (⋮) para acessar memória
+    col_title, col_menu = st.columns([0.85, 0.15])
     with col_title:
         st.title("🤖 Agente Coder")
     with col_menu:
-        # Criamos um popover com o botão de três pontinhos
-        with st.popover("⋮"):
-            if st.button("🧠 Memória", use_container_width=True):
-                st.session_state.pagina = "Memoria"
-                st.rerun()
-            # Você pode adicionar outras opções aqui futuramente
+        if st.button("⋮", help="Configurações de memória"):
+            st.session_state.pagina = "Memoria"
+            st.rerun()
     
-    # Se não houver conversa ativa, criar uma nova
     if not st.session_state.active_chat_id:
         st.session_state.active_chat_id = criar_nova_conversa(user_email)
         st.rerun()
     
-    # Exibir histórico da conversa atual
     messages = carregar_historico_chat(st.session_state.active_chat_id)
     for msg in messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
     
-    # Campo de entrada
     chat_prompt = st.chat_input("Digite sua mensagem...")
     
     if chat_prompt:
-        # Extrair memórias automaticamente (se for uma mensagem substancial)
-        if len(chat_prompt) > 10:
-            extrair_memorias_llm(chat_prompt, user_email)
+        # Extrair memórias automaticamente
+        extrair_memorias(chat_prompt, user_email)
         
         salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
         atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
@@ -331,7 +343,6 @@ if st.session_state.pagina == "Chat":
                 try:
                     client = Groq(api_key=str(api_key).strip())
                     
-                    # Carrega memórias organizadas
                     perfil = carregar_perfil(user_email)
                     texto_perfil = ""
                     for categoria, itens in perfil.items():
@@ -359,8 +370,7 @@ if st.session_state.pagina == "Chat":
                     st.error(f"⚠️ Erro ao conectar com a Groq: {err}")
 
 else:
-    # --- PÁGINA DE MEMÓRIA (Configurações) ---
-    # Botão de voltar bem visível
+    # --- PÁGINA DE MEMÓRIA ---
     col_back, col_title = st.columns([0.15, 0.85])
     with col_back:
         if st.button("← Voltar", use_container_width=True):
