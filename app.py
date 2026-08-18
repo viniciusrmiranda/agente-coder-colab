@@ -134,20 +134,17 @@ def carregar_perfil(email):
 def salvar_perfil(email, categoria, chave, valor):
     if not chave or not valor or len(valor) < 2:
         return False
-    
-    # Garantir que a chave seja única dentro da categoria
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    # Garante chave única dentro da categoria
     perfil_existente = carregar_perfil(email)
     if categoria in perfil_existente and chave in perfil_existente[categoria]:
-        # Se a chave já existe, adiciona um sufixo numérico
         contador = 1
         nova_chave = f"{chave}_{contador}"
         while categoria in perfil_existente and nova_chave in perfil_existente[categoria]:
             contador += 1
             nova_chave = f"{chave}_{contador}"
         chave = nova_chave
-    
-    conn = sqlite3.connect("memoria_agente.db")
-    c = conn.cursor()
     c.execute(
         "INSERT OR REPLACE INTO perfil (user_email, categoria, chave, valor, atualizado_em) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
         (email, categoria.strip(), chave.strip(), valor.strip())
@@ -162,88 +159,6 @@ def deletar_memoria(email, categoria, chave):
     c.execute("DELETE FROM perfil WHERE user_email = ? AND categoria = ? AND chave = ?", (email, categoria, chave))
     conn.commit()
     conn.close()
-
-# --- EXTRAÇÃO DE MEMÓRIAS VIA LLM (SEM REGEX) ---
-def extrair_memorias_por_llm(historico_completo, email):
-    """
-    Usa o LLM para analisar TODO o histórico da conversa e extrair memórias relevantes.
-    Retorna True se pelo menos uma memória nova foi salva.
-    """
-    api_key = st.secrets.get("GROQ_API_KEY")
-    if not api_key:
-        return False
-
-    categorias_validas = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
-    
-    # Monta o diálogo completo para o prompt
-    dialogo = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in historico_completo])
-    
-    prompt = f"""
-    Você é um assistente especializado em extrair informações relevantes sobre o usuário a partir de conversas.
-    
-    Analise TODO o diálogo abaixo e identifique QUALQUER informação que o usuário compartilhou sobre si mesmo, sua família, interesses, projetos, habilidades, preferências, localização, estudos, trabalho, estilo de escrita, áreas de atuação, etc.
-    
-    **REGRAS DE CATEGORIZAÇÃO:**
-    1. "Você" → informações pessoais: nome, idade, cidade, estado civil, filhos, cônjuges, parentes.
-    2. "Interesses" → hobbies, paixões, coisas que a pessoa gosta (ex: animais, música, livros, esportes).
-    3. "Tópicos" → assuntos de interesse geral (ex: programação, IA, política, economia).
-    4. "Recent Work" → projetos recentes, trabalho atual.
-    5. "Skills" → habilidades técnicas (ex: Python, JavaScript, design).
-    6. "Study" → estudos, cursos, formações.
-    7. "Writing Style" → preferências de escrita (ex: "respostas curtas", "tom formal").
-    8. "Áreas" → áreas de atuação (ex: desenvolvimento web, análise de dados).
-    
-    **IMPORTANTE:**
-    - Extraia APENAS informações que o usuário compartilhou explicitamente. Não invente.
-    - Para cada informação, crie uma chave descritiva e um valor.
-    - Se a mesma categoria tiver múltiplas informações, use chaves diferentes (ex: "interesse_animais", "interesse_musica").
-    - NÃO coloque "animais" ou "mulheres" na categoria "cidade" — isso é um erro grave.
-    
-    Retorne APENAS um objeto JSON válido com a estrutura:
-    {{
-        "memorias": [
-            {{"categoria": "categoria", "chave": "chave_unica", "valor": "valor"}}
-        ]
-    }}
-    Se não houver informações relevantes, retorne {{"memorias": []}}.
-    
-    DIÁLOGO:
-    {dialogo}
-    """
-    
-    try:
-        client = Groq(api_key=str(api_key).strip())
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {"role": "system", "content": "Você é um assistente especializado em extrair informações de conversas."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"}
-        )
-        
-        resultado = response.choices[0].message.content
-        dados = json.loads(resultado)
-        
-        salvou = False
-        for mem in dados.get("memorias", []):
-            categoria = mem.get("categoria", "Você")
-            chave = mem.get("chave", "").strip()
-            valor = mem.get("valor", "").strip()
-            
-            if chave and valor and categoria in categorias_validas:
-                # Evita categorizações erradas (ex: "cidade" com valor "mulheres")
-                if categoria == "cidade" and valor.lower() in ["mulheres", "mulher", "animais", "animal"]:
-                    continue
-                if salvar_perfil(email, categoria, chave, valor):
-                    salvou = True
-                    st.toast(f"🧠 Memória salva: {chave} → {valor}", icon="✅")
-        
-        return salvou
-    except Exception as e:
-        # Se falhar, não interrompe o chat
-        return False
 
 init_db()
 
@@ -269,6 +184,147 @@ if "active_chat_id" not in st.session_state:
 
 if "pagina" not in st.session_state:
     st.session_state.pagina = "Chat"
+
+# ========================================
+# AGENTE EXTRATOR (salva memórias)
+# ========================================
+def agente_extrator(user_msg, historico, email):
+    """
+    Analisa a mensagem do usuário e o histórico recente,
+    extrai informações relevantes e salva no perfil.
+    Retorna True se salvou algo.
+    """
+    if not user_msg or len(user_msg) < 3:
+        return False
+    
+    # Pega as últimas 5 mensagens para contexto
+    contexto = historico[-5:] if len(historico) >= 5 else historico
+    dialogo = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in contexto])
+    
+    categorias = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
+    
+    prompt = f"""
+    Você é um assistente especializado em extrair e organizar memórias sobre o usuário a partir de conversas.
+    
+    Analise a mensagem mais recente do usuário e o contexto da conversa.
+    Identifique informações relevantes sobre o usuário, como:
+    - Nome, idade, cidade, estado civil, filhos, etc. (categoria "Você")
+    - Hobbies, paixões, coisas que gosta (categoria "Interesses")
+    - Tópicos de interesse (categoria "Tópicos")
+    - Projetos recentes, trabalho (categoria "Recent Work")
+    - Habilidades técnicas (categoria "Skills")
+    - Estudos, cursos (categoria "Study")
+    - Preferências de estilo de escrita (categoria "Writing Style")
+    - Áreas de atuação (categoria "Áreas")
+    
+    **IMPORTANTE:**
+    - Se o usuário mencionar algo que já está nas memórias, NÃO salve duplicado.
+    - Use chaves descritivas únicas (ex: "nome", "cidade", "interesse_animais", "filho_jose").
+    - Retorne APENAS um objeto JSON com a estrutura:
+    {{
+        "memorias": [
+            {{"categoria": "categoria", "chave": "chave_unica", "valor": "valor"}}
+        ]
+    }}
+    Se não houver nenhuma informação nova, retorne {{"memorias": []}}.
+    
+    DIÁLOGO:
+    {dialogo}
+    """
+    try:
+        client = Groq(api_key=str(api_key).strip())
+        response = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[
+                {"role": "system", "content": "Você é um assistente especializado em extrair informações de conversas."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        resultado = response.choices[0].message.content
+        dados = json.loads(resultado)
+        salvou = False
+        for mem in dados.get("memorias", []):
+            categoria = mem.get("categoria", "Você")
+            chave = mem.get("chave", "").strip()
+            valor = mem.get("valor", "").strip()
+            if chave and valor and categoria in categorias:
+                if salvar_perfil(email, categoria, chave, valor):
+                    salvou = True
+                    st.toast(f"🧠 Memória salva: {chave} -> {valor}", icon="✅")
+        return salvou
+    except Exception as e:
+        return False
+
+# ========================================
+# AGENTE DECISOR (escolhe a melhor ação)
+# ========================================
+def agente_decisor(user_msg, historico, perfil):
+    """
+    Com base na mensagem do usuário, histórico e memórias,
+    decide qual é a melhor abordagem para a resposta.
+    Retorna um dicionário com instruções para o agente principal.
+    """
+    # Carrega memórias para contexto
+    texto_perfil = ""
+    for categoria, itens in perfil.items():
+        texto_perfil += f"\n--- {categoria} ---\n"
+        for chave, valor in itens.items():
+            texto_perfil += f"{chave}: {valor}\n"
+    
+    # Pega as últimas 5 mensagens
+    contexto = historico[-5:] if len(historico) >= 5 else historico
+    dialogo = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in contexto])
+    
+    prompt = f"""
+    Você é um assistente que decide como o agente principal deve responder ao usuário.
+    
+    Com base na mensagem do usuário, no histórico da conversa e nas memórias disponíveis,
+    determine qual é a MELHOR AÇÃO a tomar.
+    
+    MEMÓRIAS DO USUÁRIO:
+    {texto_perfil if texto_perfil else "Nenhuma memória ainda."}
+    
+    DIÁLOGO RECENTE:
+    {dialogo}
+    
+    Agora, analise e retorne um JSON com as seguintes instruções:
+    {{
+        "tom": "amigável|formal|divertido|informativo",
+        "prioridade": "responder|perguntar|sugerir|esclarecer",
+        "tema": "qual o tema principal da resposta (ex: aviação, programação, elefantes, etc.)",
+        "instrucao_extra": "qualquer instrução adicional sobre como responder"
+    }}
+    
+    **REGRAS:**
+    - Se o usuário compartilhou informação pessoal nova (nome, filho, interesse), priorize "perguntar" ou "responder" com reconhecimento.
+    - Se o usuário fez uma afirmação vaga (ex: "Animais são legais"), priorize "perguntar" (ex: "Que animais você gosta?").
+    - Se o usuário está claramente engajado em um tópico (ex: aviação), priorize "responder" sobre esse tópico.
+    - Se o usuário fez uma piada ou referência, priorize "responder" com tom divertido.
+    - Use as memórias para personalizar a resposta (ex: se sabe o nome, use-o).
+    """
+    try:
+        client = Groq(api_key=str(api_key).strip())
+        response = client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[
+                {"role": "system", "content": "Você é um assistente especializado em decidir a melhor ação para uma conversa."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"}
+        )
+        resultado = response.choices[0].message.content
+        return json.loads(resultado)
+    except Exception as e:
+        # Fallback: resposta padrão
+        return {
+            "tom": "amigável",
+            "prioridade": "responder",
+            "tema": "conversa geral",
+            "instrucao_extra": "Seja natural e pergunte se precisa de mais ajuda."
+        }
 
 # --- SIDEBAR (ESTILO CLAUDE) ---
 with st.sidebar:
@@ -365,12 +421,24 @@ if st.session_state.pagina == "Chat":
             st.markdown(chat_prompt)
         
         with st.chat_message("assistant"):
-            with st.spinner("Pensando..."):
+            with st.spinner("🧠 Processando..."):
                 try:
                     client = Groq(api_key=str(api_key).strip())
                     
-                    # Carrega memórias para o system_prompt
+                    # 1. AGENTE EXTRATOR: Salva memórias
+                    with st.spinner("📝 Extraindo memórias..."):
+                        salvou = agente_extrator(chat_prompt, messages, user_email)
+                        if salvou:
+                            st.toast("🧠 Memórias atualizadas!", icon="✅")
+                    
+                    # 2. RECARREGA PERFIL ATUALIZADO
                     perfil = carregar_perfil(user_email)
+                    
+                    # 3. AGENTE DECISOR: Decide a melhor ação
+                    with st.spinner("🤔 Analisando contexto..."):
+                        decisao = agente_decisor(chat_prompt, messages, perfil)
+                    
+                    # 4. MONTA SYSTEM PROMPT COM AS INSTRUÇÕES DO DECISOR
                     texto_perfil = ""
                     for categoria, itens in perfil.items():
                         texto_perfil += f"\n--- {categoria} ---\n"
@@ -379,15 +447,23 @@ if st.session_state.pagina == "Chat":
                     
                     system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq.
                     
-                    Você se lembra das seguintes informações sobre o usuário (organizadas por categoria):
+                    MEMÓRIAS DO USUÁRIO:
                     {texto_perfil if texto_perfil else "Nenhuma memória registrada ainda."}
                     
-                    **INSTRUÇÕES DE COMPORTAMENTO:**
-                    1. Use as memórias para entender o contexto do usuário. Se ele mencionar algo que já está nas memórias, apenas reconheça e siga em frente.
-                    2. Seja direto e conciso. Evite respostas longas desnecessárias.
-                    3. NÃO fique pedindo esclarecimento para coisas que o usuário já afirmou. Por exemplo, se ele disse "gosto de animais", apenas reconheça e pergunte se ele quer ajuda com algo relacionado.
-                    4. Se o usuário fizer uma afirmação vaga (ex: "Sabe do que gosto?"), você pode perguntar o que ele quer dizer, mas depois que ele responder, aceite a resposta sem questionar.
-                    5. Se perguntarem qual é o seu modelo, diga que você é baseado no {active_model} da Groq."""
+                    INSTRUÇÕES PARA ESTA RESPOSTA:
+                    - Tom: {decisao.get('tom', 'amigável')}
+                    - Prioridade: {decisao.get('prioridade', 'responder')}
+                    - Tema: {decisao.get('tema', 'conversa geral')}
+                    - Instrução extra: {decisao.get('instrucao_extra', 'Seja natural e útil.')}
+                    
+                    **IMPORTANTE:**
+                    - Se o usuário perguntar qual é o seu modelo, diga que é baseado no {active_model} da Groq.
+                    - Use as memórias para personalizar a resposta (ex: chame pelo nome se souber).
+                    - Se a prioridade for "perguntar", faça uma pergunta relevante sobre o tema.
+                    - Se for "responder", forneça uma resposta direta e útil.
+                    - Se for "sugerir", ofereça sugestões relacionadas ao tema.
+                    - Se for "esclarecer", peça mais informações.
+                    - Seja conciso e evite respostas muito longas desnecessárias."""
                     
                     historico = carregar_historico_chat(st.session_state.active_chat_id)
                     messages_api = [{"role": "system", "content": system_prompt}] + historico
@@ -401,14 +477,8 @@ if st.session_state.pagina == "Chat":
                     
                     salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
                     
-                    # --- EXTRAÇÃO DE MEMÓRIAS VIA LLM (APÓS A RESPOSTA) ---
-                    historico_atualizado = carregar_historico_chat(st.session_state.active_chat_id)
-                    with st.spinner("🧠 Atualizando memórias..."):
-                        if extrair_memorias_por_llm(historico_atualizado, user_email):
-                            st.toast("🧠 Memórias atualizadas!", icon="✅")
-                    
                 except Exception as err:
-                    st.error(f"⚠️ Erro ao conectar com a Groq: {err}")
+                    st.error(f"⚠️ Erro: {err}")
 
 else:
     # --- PÁGINA DE MEMÓRIA ---
