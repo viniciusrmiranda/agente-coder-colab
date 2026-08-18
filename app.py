@@ -137,7 +137,7 @@ def carregar_perfil(email):
 
 def salvar_perfil(email, categoria, chave, valor):
     if not chave or not valor:
-        return
+        return False
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     c.execute(
@@ -146,7 +146,7 @@ def salvar_perfil(email, categoria, chave, valor):
     )
     conn.commit()
     conn.close()
-    return True  # indica que salvou
+    return True
 
 def deletar_memoria(email, categoria, chave):
     conn = sqlite3.connect("memoria_agente.db")
@@ -155,57 +155,27 @@ def deletar_memoria(email, categoria, chave):
     conn.commit()
     conn.close()
 
-# --- EXTRAÇÃO AUTOMÁTICA DE MEMÓRIAS (USANDO O PRÓPRIO AGENTE) ---
-def extrair_memorias_automaticamente(user_msg, assistant_msg, email):
+# --- EXTRAÇÃO DE MEMÓRIAS (REGEX PRIORITÁRIO) ---
+def extrair_memorias(texto, email):
     """
-    Usa o modelo llama3-8b-8192 para analisar a conversa e extrair memórias.
+    Extrai memórias usando regex para padrões comuns (nome, cidade, profissão).
+    Se encontrar, salva imediatamente.
     """
-    api_key = st.secrets.get("GROQ_API_KEY")
-    if not api_key:
-        return
-    
-    categorias = ["Você", "Tópicos", "Interesses", "Recent Work", "Skills", "Study", "Writing Style", "Áreas"]
-    
-    prompt = f"""
-    Analise a conversa entre um usuário e um assistente e extraia fatos importantes sobre o usuário.
-    
-    Mensagem do usuário: "{user_msg}"
-    Resposta do assistente: "{assistant_msg}"
-    
-    Identifique informações como: nome, profissão, interesses, projetos, habilidades, preferências, localização, etc.
-    Para cada fato, defina uma categoria entre: {', '.join(categorias)}.
-    Retorne APENAS um objeto JSON válido com a estrutura:
-    {{
-        "memorias": [
-            {{"categoria": "categoria", "chave": "chave_descritiva", "valor": "valor"}}
-        ]
-    }}
-    Se não houver fatos relevantes, retorne {{"memorias": []}}.
-    """
-    try:
-        client = Groq(api_key=str(api_key).strip())
-        response = client.chat.completions.create(
-            model="llama3-8b-8192",
-            messages=[
-                {"role": "system", "content": "Você é um assistente especializado em extrair informações relevantes de conversas."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"}
-        )
-        resultado = response.choices[0].message.content
-        dados = json.loads(resultado)
-        salvou = False
-        for mem in dados.get("memorias", []):
-            categoria = mem.get("categoria", "Você")
-            chave = mem.get("chave", "").strip()
-            valor = mem.get("valor", "").strip()
-            if chave and valor and categoria in categorias:
-                if salvar_perfil(email, categoria, chave, valor):
+    salvou = False
+    padroes = {
+        "nome": r"(?:meu nome é|eu sou|chamo-me|me chamo|sou o|sou a|me chamo de)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
+        "cidade": r"(?:moro em|sou de|resido em|de)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+)",
+        "profissão": r"(?:sou|trabalho como|atualmente sou|profissão|trabalho com)\s+([A-Za-zÀ-ÖØ-öø-ÿ\s]+(?:desenvolvedor|engenheiro|analista|designer|gerente|estudante|professor|advogado|médico|arquiteto))",
+    }
+    for chave, padrao in padroes.items():
+        match = re.search(padrao, texto, re.IGNORECASE)
+        if match:
+            valor = match.group(1).strip()
+            if len(valor) > 2:
+                if salvar_perfil(email, "Você", chave, valor):
                     salvou = True
-        return salvou
-    except Exception:
-        return False
+                    st.toast(f"🧠 Memória salva: {chave} -> {valor}", icon="✅")
+    return salvou
 
 init_db()
 
@@ -300,7 +270,6 @@ with st.sidebar:
 
 # --- ÁREA PRINCIPAL ---
 if st.session_state.pagina == "Chat":
-    # Cabeçalho com botão de três pontinhos
     col_title, col_menu = st.columns([0.85, 0.15])
     with col_title:
         st.title("🤖 Agente Coder")
@@ -321,20 +290,26 @@ if st.session_state.pagina == "Chat":
     chat_prompt = st.chat_input("Digite sua mensagem...")
     
     if chat_prompt:
-        # Salva mensagem do usuário
+        # 1. Extrai memórias ANTES de responder (para já capturar o que o usuário disse)
+        salvou = extrair_memorias(chat_prompt, user_email)
+        if salvou:
+            # Recarrega o perfil para o system_prompt refletir a nova memória
+            pass
+        
+        # 2. Salva mensagem do usuário
         salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
         atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
         
         with st.chat_message("user"):
             st.markdown(chat_prompt)
         
-        # Resposta do assistente
+        # 3. Resposta do assistente
         with st.chat_message("assistant"):
             with st.spinner("Pensando..."):
                 try:
                     client = Groq(api_key=str(api_key).strip())
                     
-                    # Carrega memórias para o system_prompt
+                    # Carrega memórias atualizadas
                     perfil = carregar_perfil(user_email)
                     texto_perfil = ""
                     for categoria, itens in perfil.items():
@@ -344,7 +319,7 @@ if st.session_state.pagina == "Chat":
                     
                     system_prompt = f"""Você é um assistente especialista em programação.
                     Você se lembra das seguintes informações sobre o usuário (organizadas por categoria):
-                    {texto_perfil if texto_perfil else "Nenhuma memória registrada."}
+                    {texto_perfil if texto_perfil else "Nenhuma memória registrada ainda."}
                     
                     Use essas informações para personalizar suas respostas."""
                     
@@ -358,15 +333,8 @@ if st.session_state.pagina == "Chat":
                     bot_reply = chat_completion.choices[0].message.content
                     st.markdown(bot_reply)
                     
-                    # Salva resposta do assistente
+                    # 4. Salva resposta do assistente
                     salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
-                    
-                    # --- EXTRAÇÃO AUTOMÁTICA DE MEMÓRIAS (APÓS A RESPOSTA) ---
-                    # Usa o modelo para extrair memórias da conversa (último turno)
-                    with st.spinner("🧠 Refletindo sobre a conversa..."):
-                        salvou = extrair_memorias_automaticamente(chat_prompt, bot_reply, user_email)
-                        if salvou:
-                            st.toast("🧠 Nova memória salva!", icon="✅")
                     
                 except Exception as err:
                     st.error(f"⚠️ Erro ao conectar com a Groq: {err}")
