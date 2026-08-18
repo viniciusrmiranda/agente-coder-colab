@@ -17,11 +17,10 @@ if not st.user.is_logged_in:
 user_email = st.user.email
 st.title(f"🤖 Olá, {user_email}!")
 
-# --- BANCO DE DADOS (SQLite com Migração Automática) ---
+# --- BANCO DE DADOS (SQLite) ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, role TEXT, content TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS perfil 
@@ -171,7 +170,7 @@ Perfil retido do usuário:
         try:
             client = Groq(api_key=str(api_key).strip())
             response = client.chat.completions.create(
-                model="llama-3.1-70b-versatile",
+                model="llama-3.3-70b-versatile",
                 messages=messages_payload
             )
             bot_reply = response.choices[0].message.content
