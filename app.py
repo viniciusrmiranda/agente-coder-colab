@@ -25,10 +25,16 @@ def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     
-    # Tabela conversas com coluna fixado
+    # Tabela conversas (com migração para adicionar coluna fixado se não existir)
     c.execute('''CREATE TABLE IF NOT EXISTS conversas 
                  (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
-                  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP, fixado INTEGER DEFAULT 0)''')
+                  criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+    # Verifica se a coluna fixado existe, senão adiciona
+    c.execute("PRAGMA table_info(conversas)")
+    colunas = [col[1] for col in c.fetchall()]
+    if "fixado" not in colunas:
+        c.execute("ALTER TABLE conversas ADD COLUMN fixado INTEGER DEFAULT 0")
     
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
@@ -53,16 +59,9 @@ def init_db():
 def listar_conversas(email, filtro=None):
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
-    # Verifica se a coluna fixado existe; se não, adiciona
-    c.execute("PRAGMA table_info(conversas)")
-    colunas = [info[1] for info in c.fetchall()]
-    if "fixado" not in colunas:
-        c.execute("ALTER TABLE conversas ADD COLUMN fixado INTEGER DEFAULT 0")
-        conn.commit()
-    
     query = "SELECT chat_id, titulo, fixado FROM conversas WHERE user_email = ?"
     params = [email]
-    if filtro:
+    if filtro and filtro.strip():
         query += " AND titulo LIKE ?"
         params.append(f"%{filtro}%")
     query += " ORDER BY fixado DESC, criado_em DESC"
@@ -211,9 +210,10 @@ preferenciais = [
 ]
 active_model = preferenciais[0]
 
-# --- GERENCIAMENTO DE SESSÃO ---
+# --- GERENCIAMENTO DE SESSÃO DO CHAT ---
 if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = None
+
 if "pagina" not in st.session_state:
     st.session_state.pagina = "Chat"  # "Chat" ou "Memoria"
 
@@ -221,22 +221,25 @@ if "pagina" not in st.session_state:
 with st.sidebar:
     st.title("📋 Claude")
     
-    busca = st.text_input("🔍 Buscar conversas", placeholder="Digite para filtrar...")
+    # Campo de busca
+    busca = st.text_input("🔍 Buscar conversas", placeholder="Digite para filtrar...", key="search_input")
     
-    # Botão Nova Conversa - agora com redirecionamento para Chat
+    # Botão Nova Conversa
     if st.button("➕ Nova Conversa", use_container_width=True):
         novo_id = criar_nova_conversa(user_email)
         st.session_state.active_chat_id = novo_id
-        st.session_state.pagina = "Chat"
+        st.session_state.pagina = "Chat"  # Volta para o chat ao criar nova conversa
         st.rerun()
     
     st.markdown("---")
     
+    # Listar conversas (com filtro)
     conversas = listar_conversas(user_email, busca if busca else None)
     
     if not conversas:
         st.info("Nenhuma conversa encontrada.")
     else:
+        # Separar fixadas e não fixadas
         fixadas = [c for c in conversas if c[2] == 1]
         nao_fixadas = [c for c in conversas if c[2] == 0]
         
@@ -286,7 +289,7 @@ with st.sidebar:
 
 # --- ÁREA PRINCIPAL ---
 if st.session_state.pagina == "Chat":
-    # Título com botão de três pontinhos (configurações)
+    # Título com botão de engrenagem (acesso à memória)
     col_title, col_gear = st.columns([0.85, 0.15])
     with col_title:
         st.title("🤖 Agente Coder")
@@ -306,9 +309,11 @@ if st.session_state.pagina == "Chat":
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
     
+    # Campo de entrada
     chat_prompt = st.chat_input("Digite sua mensagem...")
     
     if chat_prompt:
+        # Extrair memórias automaticamente (se for uma mensagem substancial)
         if len(chat_prompt) > 10:
             extrair_memorias_llm(chat_prompt, user_email)
         
@@ -323,6 +328,7 @@ if st.session_state.pagina == "Chat":
                 try:
                     client = Groq(api_key=str(api_key).strip())
                     
+                    # Carrega memórias organizadas
                     perfil = carregar_perfil(user_email)
                     texto_perfil = ""
                     for categoria, itens in perfil.items():
@@ -351,9 +357,10 @@ if st.session_state.pagina == "Chat":
 
 else:
     # --- PÁGINA DE MEMÓRIA (Configurações) ---
-    col_back, col_title = st.columns([0.1, 0.9])
+    # Botão de voltar bem visível
+    col_back, col_title = st.columns([0.15, 0.85])
     with col_back:
-        if st.button("← Voltar"):
+        if st.button("← Voltar", use_container_width=True):
             st.session_state.pagina = "Chat"
             st.rerun()
     with col_title:
