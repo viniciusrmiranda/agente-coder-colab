@@ -8,13 +8,7 @@ import re
 import json
 import numpy as np
 from sentence_transformers import SentenceTransformer
-
-# --- TENTAR IMPORTAR LETTA (opcional) ---
-try:
-    from letta_client import Letta
-    LETTA_AVAILABLE = True
-except ImportError:
-    LETTA_AVAILABLE = False
+import requests  # <--- ADICIONADO PARA API REST
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖", layout="wide")
 
@@ -178,58 +172,67 @@ def extrair_memorias_automatico(texto, email, api_key):
         except Exception:
             continue  # Tenta o próximo modelo
 
-# --- ====== NOVA PARTE: INTEGRAÇÃO COM LETTA ====== ---
-# Mantém tudo que já funciona, apenas adiciona Letta como camada extra
+# --- ====== INTEGRAÇÃO COM LETTA VIA API REST ====== ---
+# Usa requests diretamente, sem depender do SDK
 
-# Tenta conectar ao Letta se disponível
 letta_api_key = st.secrets.get("LETTA_API_KEY")
 LETTA_ACTIVE = False
-letta_client = None
 agent_id = None
 
-if LETTA_AVAILABLE and letta_api_key:
+if letta_api_key:
     try:
-        # CORREÇÃO: usa 'api_key' em vez de 'token'
-        letta_client = Letta(api_key=letta_api_key)
+        headers = {"Authorization": f"Bearer {letta_api_key}", "Content-Type": "application/json"}
         
-        # Nome do agente baseado no email do usuário
-        AGENT_NAME = f"agente-coder-{user_email.replace('@', '-')}"
+        # Testa a conexão listando agentes
+        response = requests.get("https://api.letta.com/v1/agents", headers=headers, timeout=5)
         
-        # Buscar agente existente
-        agentes = letta_client.agents.list()
-        agente_existente = None
-        for a in agentes:
-            if a.name == AGENT_NAME:
-                agente_existente = a
-                break
-        
-        if agente_existente:
-            agent_id = agente_existente.id
-            st.sidebar.success("🧠 Agente Letta carregado com memória persistente!")
+        if response.status_code == 200:
+            agentes = response.json()
+            AGENT_NAME = f"agente-coder-{user_email.replace('@', '-')}"
+            
+            # Procura agente existente
+            agente_existente = None
+            for a in agentes.get("data", []):
+                if a.get("name") == AGENT_NAME:
+                    agente_existente = a
+                    break
+            
+            if agente_existente:
+                agent_id = agente_existente["id"]
+                st.sidebar.success("🧠 Agente Letta carregado com memória persistente!")
+            else:
+                # Cria um novo agente
+                create_data = {
+                    "name": AGENT_NAME,
+                    "model": "groq/llama-3.3-70b-versatile",
+                    "memory_blocks": [
+                        {"label": "persona", "value": "Você é um assistente especialista em programação, chamado Agente Coder. Você é direto, útil e responde em português."},
+                        {"label": "human", "value": f"O usuário é {user_email}. Ainda não tenho informações sobre ele."}
+                    ]
+                }
+                response_create = requests.post(
+                    "https://api.letta.com/v1/agents",
+                    json=create_data,
+                    headers=headers,
+                    timeout=10
+                )
+                if response_create.status_code in [200, 201]:
+                    novo_agente = response_create.json()
+                    agent_id = novo_agente["id"]
+                    st.sidebar.success("🧠 Novo agente Letta criado com memória persistente!")
+                else:
+                    st.sidebar.warning(f"⚠️ Erro ao criar agente Letta: {response_create.status_code}")
+            
+            if agent_id:
+                LETTA_ACTIVE = True
         else:
-            # Cria um novo agente
-            novo_agente = letta_client.agents.create(
-                name=AGENT_NAME,
-                model="groq/llama-3.3-70b-versatile",
-                embedding="openai/text-embedding-3-small",
-                memory_blocks=[
-                    {"label": "persona", "value": "Você é um assistente especialista em programação, chamado Agente Coder. Você é direto, útil e responde em português."},
-                    {"label": "human", "value": f"O usuário é {user_email}. Ainda não tenho informações sobre ele."}
-                ]
-            )
-            agent_id = novo_agente.id
-            st.sidebar.success("🧠 Novo agente Letta criado com memória persistente!")
-        
-        LETTA_ACTIVE = True
-        
+            st.sidebar.warning(f"⚠️ Erro ao conectar ao Letta: {response.status_code}")
+            
     except Exception as e:
         st.sidebar.warning(f"⚠️ Erro ao conectar com Letta: {e}. Usando modo fallback.")
         LETTA_ACTIVE = False
 else:
-    if not LETTA_AVAILABLE:
-        st.sidebar.info("ℹ️ Letta não instalado. Usando memória local.")
-    elif not letta_api_key:
-        st.sidebar.info("ℹ️ LETTA_API_KEY não configurada. Usando memória local.")
+    st.sidebar.info("ℹ️ LETTA_API_KEY não configurada. Usando memória local.")
 
 init_db()
 
@@ -293,14 +296,19 @@ with st.sidebar:
     st.sidebar.subheader("🧠 Memórias")
     
     # Se Letta estiver ativo, mostrar memórias do Letta
-    if LETTA_ACTIVE and letta_client and agent_id:
+    if LETTA_ACTIVE and agent_id:
         try:
-            agent = letta_client.agents.retrieve(agent_id)
-            for block in agent.memory_blocks:
-                if block.label == "human":
-                    st.sidebar.info(f"👤 Sobre você: {block.value[:100]}...")
-                elif block.label == "persona":
-                    st.sidebar.info(f"🤖 Sobre o agente: {block.value[:100]}...")
+            headers = {"Authorization": f"Bearer {letta_api_key}"}
+            response = requests.get(f"https://api.letta.com/v1/agents/{agent_id}", headers=headers, timeout=5)
+            if response.status_code == 200:
+                agent = response.json()
+                for block in agent.get("memory_blocks", []):
+                    if block.get("label") == "human":
+                        st.sidebar.info(f"👤 Sobre você: {block.get('value', '')[:100]}...")
+                    elif block.get("label") == "persona":
+                        st.sidebar.info(f"🤖 Sobre o agente: {block.get('value', '')[:100]}...")
+            else:
+                st.sidebar.warning("Erro ao carregar memórias do Letta")
         except Exception as e:
             st.sidebar.warning(f"Erro ao carregar memórias do Letta: {e}")
     else:
@@ -351,36 +359,45 @@ if chat_prompt:
             resposta_gerada = False
             
             # TENTA USAR LETTA PRIMEIRO (se disponível)
-            if LETTA_ACTIVE and letta_client and agent_id:
+            if LETTA_ACTIVE and agent_id:
                 try:
-                    # Envia para o agente Letta
-                    response = letta_client.agents.messages.create(
-                        agent_id=agent_id,
-                        messages=[{"role": "user", "content": chat_prompt}]
+                    headers = {"Authorization": f"Bearer {letta_api_key}", "Content-Type": "application/json"}
+                    payload = {
+                        "agent_id": agent_id,
+                        "messages": [{"role": "user", "content": chat_prompt}]
+                    }
+                    response = requests.post(
+                        "https://api.letta.com/v1/agents/messages",
+                        json=payload,
+                        headers=headers,
+                        timeout=30
                     )
                     
-                    # Extrai a resposta do assistente
-                    bot_reply = ""
-                    for msg in response.messages:
-                        if hasattr(msg, "message_type") and msg.message_type == "assistant_message":
-                            bot_reply += getattr(msg, "content", "")
-                    
-                    st.markdown(bot_reply)
-                    salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
-                    resposta_gerada = True
-                    
-                    # Mostra memórias atualizadas do Letta
-                    with st.expander("🧠 Memórias do Letta atualizadas"):
-                        agent = letta_client.agents.retrieve(agent_id)
-                        for block in agent.memory_blocks:
-                            if block.label == "human":
-                                st.write(f"**👤 Sobre você:** {block.value}")
-                            elif block.label == "persona":
-                                st.write(f"**🤖 Sobre o agente:** {block.value}")
-                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        bot_reply = ""
+                        for msg in data.get("messages", []):
+                            if msg.get("message_type") == "assistant_message":
+                                bot_reply += msg.get("content", "")
+                        
+                        st.markdown(bot_reply)
+                        salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
+                        resposta_gerada = True
+                        
+                        # Mostra memórias atualizadas do Letta
+                        with st.expander("🧠 Memórias do Letta atualizadas"):
+                            agent_resp = requests.get(f"https://api.letta.com/v1/agents/{agent_id}", headers=headers, timeout=5)
+                            if agent_resp.status_code == 200:
+                                agent = agent_resp.json()
+                                for block in agent.get("memory_blocks", []):
+                                    if block.get("label") == "human":
+                                        st.write(f"**👤 Sobre você:** {block.get('value', '')}")
+                                    elif block.get("label") == "persona":
+                                        st.write(f"**🤖 Sobre o agente:** {block.get('value', '')}")
+                    else:
+                        st.warning(f"⚠️ Erro com Letta: {response.status_code}. Usando fallback Groq.")
                 except Exception as e:
                     st.warning(f"⚠️ Erro com Letta: {e}. Usando fallback Groq.")
-                    # Fallback para Groq
             
             # Se Letta falhou ou não está ativo, usa Groq (seu código original)
             if not resposta_gerada:
