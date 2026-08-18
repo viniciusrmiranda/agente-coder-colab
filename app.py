@@ -96,7 +96,7 @@ st.sidebar.write(f"Conectado como:\n**{user_email}**")
 if st.sidebar.button("🚪 Sair / Logout"):
     st.logout()
 
-# UPLOAD DE ARQUIVOS
+# UPLOAD DE ARQUIVOS COM TRUNCAGEM DE TOKENS
 st.sidebar.subheader("📁 Anexar Arquivo")
 uploaded_file = st.sidebar.file_uploader(
     "Envie um arquivo (PDF, TXT, PY, JSON, MD, CSV)", 
@@ -104,16 +104,22 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 file_content_context = ""
+MAX_CHARACTERS = 12000 # Limite defensivo para não estourar a cota de tokens (TPM)
+
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith(".pdf"):
             pdf_reader = pypdf.PdfReader(uploaded_file)
             pdf_text = "\n".join([page.extract_text() or "" for page in pdf_reader.pages])
+            if len(pdf_text) > MAX_CHARACTERS:
+                pdf_text = pdf_text[:MAX_CHARACTERS] + "\n\n[...Texto resumido para respeitar o limite de tokens da API...]"
             file_content_context = f"\n\n--- Conteúdo do PDF ({uploaded_file.name}) ---\n{pdf_text}\n--- Fim do PDF ---"
         else:
             file_text = uploaded_file.read().decode("utf-8")
+            if len(file_text) > MAX_CHARACTERS:
+                file_text = file_text[:MAX_CHARACTERS] + "\n\n[...Texto resumido para respeitar o limite de tokens da API...]"
             file_content_context = f"\n\n--- Conteúdo do Arquivo ({uploaded_file.name}) ---\n{file_text}\n--- Fim do Arquivo ---"
-        st.sidebar.success(f"Arquivo '{uploaded_file.name}' carregado com sucesso!")
+        st.sidebar.success(f"Arquivo '{uploaded_file.name}' carregado!")
     except Exception as e:
         st.sidebar.error(f"Erro ao processar arquivo: {e}")
 
@@ -161,7 +167,8 @@ Perfil retido do usuário:
 {texto_perfil}"""
 
     messages_payload = [{"role": "system", "content": system_prompt}]
-    for m in st.session_state.messages[-10:]:
+    # Limita o histórico das últimas 4 mensagens para economizar tokens
+    for m in st.session_state.messages[-4:]:
         messages_payload.append({"role": m["role"], "content": m["content"]})
     
     messages_payload[-1]["content"] += file_content_context + extra_context
@@ -170,7 +177,7 @@ Perfil retido do usuário:
         try:
             client = Groq(api_key=str(api_key).strip())
             response = client.chat.completions.create(
-                model="openai/gpt-oss-120b",
+                model="llama-3.3-70b-versatile",
                 messages=messages_payload
             )
             bot_reply = response.choices[0].message.content
