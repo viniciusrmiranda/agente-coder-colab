@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import sqlite3
 from groq import Groq
 from duckduckgo_search import DDGS
@@ -179,43 +179,50 @@ for msg in messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# --- CAMPO DE ARQUIVO E ENTRADA DENTRO DA INTERFACE PRINCIPAL ---
+# --- CAMPO DE CHAT COM ANEXO INTEGRADO (+ BOTÃO IGUAL CHATGPT) ---
 MAX_CHARACTERS = 12000
 
-# Expander para anexar arquivo direto na conversa
-with st.expander("📎 Anexar arquivo a esta mensagem", expanded=False):
-    uploaded_file = st.file_uploader(
-        "Selecione um arquivo (PDF, TXT, PY, JSON, MD, CSV)", 
-        type=["pdf", "txt", "py", "json", "md", "csv"],
-        key=f"file_{st.session_state.active_chat_id}"
-    )
+# accept_file permite anexar arquivos diretamente na barra de texto
+chat_prompt = st.chat_input(
+    "Digite sua mensagem...",
+    accept_file="multiple",
+    file_type=["pdf", "txt", "py", "json", "md", "csv"]
+)
 
-if user_input := st.chat_input("Digite sua mensagem..."):
-    # Atualiza o título da conversa se for a primeira mensagem
-    if len(messages) == 0:
+if chat_prompt:
+    user_input = chat_prompt.text or ""
+    uploaded_files = chat_prompt.files or []
+
+    # Atualiza o título da conversa na primeira mensagem
+    if len(messages) == 0 and user_input:
         atualizar_titulo_conversa(st.session_state.active_chat_id, user_input)
 
     file_content_context = ""
-    if uploaded_file is not None:
+    nomer_arquivos_display = []
+
+    # Processa os arquivos anexados pelo botão '+' do chat
+    for uploaded_file in uploaded_files:
+        nomer_arquivos_display.append(uploaded_file.name)
         try:
             if uploaded_file.name.endswith(".pdf"):
                 pdf_reader = pypdf.PdfReader(uploaded_file)
                 pdf_text = "\n".join([page.extract_text() or "" for page in pdf_reader.pages])
                 if len(pdf_text) > MAX_CHARACTERS:
                     pdf_text = pdf_text[:MAX_CHARACTERS] + "\n\n[...Texto resumido...]"
-                file_content_context = f"\n\n--- Anexo: {uploaded_file.name} ---\n{pdf_text}\n--- Fim do Anexo ---"
+                file_content_context += f"\n\n--- Anexo: {uploaded_file.name} ---\n{pdf_text}\n--- Fim do Anexo ---"
             else:
                 file_text = uploaded_file.read().decode("utf-8")
                 if len(file_text) > MAX_CHARACTERS:
                     file_text = file_text[:MAX_CHARACTERS] + "\n\n[...Texto resumido...]"
-                file_content_context = f"\n\n--- Anexo: {uploaded_file.name} ---\n{file_text}\n--- Fim do Anexo ---"
+                file_content_context += f"\n\n--- Anexo: {uploaded_file.name} ---\n{file_text}\n--- Fim do Anexo ---"
         except Exception as e:
-            st.error(f"Erro ao ler arquivo: {e}")
+            st.error(f"Erro ao ler arquivo {uploaded_file.name}: {e}")
 
-    # Exibe a mensagem do usuário com indicação visual do anexo
+    # Monta a exibição na tela do chat
     user_display = user_input
-    if uploaded_file is not None:
-        user_display = f"📄 *Anexo: {uploaded_file.name}*\n\n" + user_input
+    if nomer_arquivos_display:
+        anexos_str = ", ".join(nomer_arquivos_display)
+        user_display = f"📄 *Anexo(s): {anexos_str}*\n\n" + (user_input if user_input else "Analisar arquivo enviado.")
 
     salvar_mensagem(st.session_state.active_chat_id, user_email, "user", user_display)
     with st.chat_message("user"):
@@ -223,13 +230,14 @@ if user_input := st.chat_input("Digite sua mensagem..."):
 
     # Busca Web
     extra_context = ""
-    try:
-        with DDGS() as ddgs:
-            results = [f"- {r['title']}: {r['body']}" for r in ddgs.text(user_input, max_results=3)]
-            if results:
-                extra_context = "\n\n--- Resultados de Pesquisa ---\n" + "\n".join(results)
-    except Exception as e:
-        extra_context = f"\n[Busca indisponível: {e}]"
+    if user_input:
+        try:
+            with DDGS() as ddgs:
+                results = [f"- {r['title']}: {r['body']}" for r in ddgs.text(user_input, max_results=3)]
+                if results:
+                    extra_context = "\n\n--- Resultados de Pesquisa ---\n" + "\n".join(results)
+        except Exception as e:
+            extra_context = f"\n[Busca indisponível: {e}]"
 
     fatos_perfil = carregar_perfil(user_email)
     texto_perfil = "\n".join([f"{k}: {v}" for k, v in fatos_perfil.items()]) if fatos_perfil else "Sem preferências registradas."
@@ -239,14 +247,14 @@ Usuário logado via Google: {user_email}
 Perfil retido do usuário:
 {texto_perfil}"""
 
-    # Carrega histórico atualizado do banco
+    # Carrega histórico atualizado
     history_messages = carregar_historico_chat(st.session_state.active_chat_id)
     messages_payload = [{"role": "system", "content": system_prompt}]
     
     for m in history_messages[-6:]:
         messages_payload.append({"role": m["role"], "content": m["content"]})
     
-    # Injeta o conteúdo real do arquivo no prompt enviado ao LLM
+    # Injeta conteúdo do arquivo e busca na mensagem
     if file_content_context:
         messages_payload[-1]["content"] += file_content_context
     if extra_context:
