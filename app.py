@@ -4,7 +4,10 @@ from groq import Groq
 from duckduckgo_search import DDGS
 import pypdf
 import uuid
-from mem0 import Memory
+import re
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import json
 
 st.set_page_config(page_title="Agente Coder", page_icon="🤖", layout="wide")
 
@@ -18,53 +21,30 @@ if not st.user.is_logged_in:
 
 user_email = st.user.email
 
-# --- CONFIGURAÇÃO DO MEM0 (versão simplificada e validada) ---
-# A documentação oficial sugere esta estrutura para a versão 2.x
-config = {
-    "llm": {
-        "provider": "groq",
-        "config": {
-            "model": "llama3-70b-8192",
-            "temperature": 0.1,
-            "max_tokens": 2000,
-        }
-    },
-    "embedder": {
-        "provider": "sentence-transformers",
-        "config": {
-            "model": "all-MiniLM-L6-v2"
-        }
-    },
-    "vector_store": {
-        "provider": "none",  # desativa o banco vetorial para simplificar
-    }
-}
+# --- CARREGAR MODELO DE EMBEDDING (LOCAL) ---
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer('all-MiniLM-L6-v2')
 
-# Inicializa o Mem0
-try:
-    memory = Memory.from_config(config)
-except Exception as e:
-    st.error(f"Erro ao inicializar Mem0: {e}. Usando memória básica (sem busca semântica).")
-    # Fallback: cria um objeto Memory com configuração padrão (que pode não funcionar com Groq)
-    memory = Memory()
+embedder = load_embedder()
 
-# --- BANCO DE DADOS (SQLite) ---
+# --- BANCO DE DADOS COM MEMÓRIA ---
 def init_db():
     conn = sqlite3.connect("memoria_agente.db")
     c = conn.cursor()
     
+    # Conversas
     c.execute('''CREATE TABLE IF NOT EXISTS conversas 
                  (chat_id TEXT PRIMARY KEY, user_email TEXT, titulo TEXT, 
                   criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
+    # Histórico
     c.execute('''CREATE TABLE IF NOT EXISTS historico 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, user_email TEXT, role TEXT, content TEXT)''')
     
-    try:
-        c.execute("SELECT user_email, chave, valor FROM perfil LIMIT 1")
-    except sqlite3.OperationalError:
-        c.execute("DROP TABLE IF EXISTS perfil")
-        c.execute("CREATE TABLE perfil (user_email TEXT, chave TEXT, valor TEXT, PRIMARY KEY (user_email, chave))")
+    # Memórias (com embedding armazenado como JSON)
+    c.execute('''CREATE TABLE IF NOT EXISTS memorias 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, fato TEXT, embedding TEXT, criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
     conn.commit()
     conn.close()
@@ -117,6 +97,70 @@ def deletar_conversa(chat_id):
     conn.commit()
     conn.close()
 
+# --- FUNÇÕES DE MEMÓRIA ---
+def salvar_memoria(email, fato):
+    """Salva um fato na memória com embedding."""
+    if not fato or len(fato) < 5:
+        return
+    embedding = embedder.encode(fato).tolist()
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO memorias (user_email, fato, embedding) VALUES (?, ?, ?)", 
+              (email, fato, json.dumps(embedding)))
+    conn.commit()
+    conn.close()
+
+def buscar_memorias(email, query, limit=3):
+    """Busca memórias relevantes usando similaridade de cosseno."""
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("SELECT id, fato, embedding FROM memorias WHERE user_email = ? ORDER BY criado_em DESC", (email,))
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        return []
+    
+    query_embedding = embedder.encode(query)
+    resultados = []
+    for id, fato, emb_json in rows:
+        emb = np.array(json.loads(emb_json))
+        # Similaridade de cosseno
+        sim = np.dot(query_embedding, emb) / (np.linalg.norm(query_embedding) * np.linalg.norm(emb) + 1e-8)
+        resultados.append((sim, fato))
+    
+    # Ordena por similaridade
+    resultados.sort(key=lambda x: x[0], reverse=True)
+    return [fato for _, fato in resultados[:limit]]
+
+# --- EXTRAÇÃO DE MEMÓRIAS USANDO GROQ ---
+def extrair_memorias_automatico(texto, email, api_key):
+    """Usa o Groq para extrair fatos da mensagem do usuário."""
+    prompt = f"""
+    Analise a mensagem do usuário abaixo e extraia fatos importantes sobre ele (nome, interesses, profissão, projetos, habilidades, etc.).
+    Retorne APENAS uma lista de fatos, um por linha, sem numeração ou formatação extra.
+    Se não houver fatos relevantes, retorne a palavra "NENHUM".
+    
+    Mensagem: "{texto}"
+    """
+    try:
+        client = Groq(api_key=str(api_key).strip())
+        response = client.chat.completions.create(
+            model="llama3-8b-8192",  # modelo leve para extração
+            messages=[{"role": "system", "content": "Você é um assistente especializado em extrair fatos de conversas."},
+                      {"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+        resultado = response.choices[0].message.content.strip()
+        if resultado and resultado != "NENHUM":
+            for linha in resultado.split('\n'):
+                fato = linha.strip()
+                if fato and len(fato) > 5:
+                    salvar_memoria(email, fato)
+                    st.toast(f"🧠 Memória salva: {fato[:50]}...", icon="✅")
+    except Exception as e:
+        pass  # Não quebra o app
+
 init_db()
 
 # --- VALIDAR GROQ API KEY ---
@@ -125,7 +169,7 @@ if not api_key:
     st.error("GROQ_API_KEY não configurada nos Secrets.")
     st.stop()
 
-# --- MODELO ATIVO ---
+# --- MODELO PRINCIPAL ---
 active_model = "llama3-70b-8192"
 
 # --- GERENCIAMENTO DE SESSÃO ---
@@ -135,14 +179,12 @@ if "active_chat_id" not in st.session_state:
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("📋 Conversas")
-    
     if st.button("➕ Nova Conversa", use_container_width=True):
         novo_id = criar_nova_conversa(user_email)
         st.session_state.active_chat_id = novo_id
         st.rerun()
     
     st.markdown("---")
-    
     conversas = listar_conversas(user_email)
     if not conversas:
         st.info("Nenhuma conversa encontrada.")
@@ -160,17 +202,18 @@ with st.sidebar:
     
     st.sidebar.markdown("---")
     
-    # --- EXIBIR MEMÓRIAS SALVAS (tentar com o Mem0) ---
+    # Exibir memórias salvas
     st.sidebar.subheader("🧠 Memórias")
-    try:
-        memorias = memory.search(query="", user_id=user_email, limit=10)
-        if memorias and "results" in memorias and memorias["results"]:
-            for mem in memorias["results"]:
-                st.sidebar.write(f"- {mem['memory']}")
-        else:
-            st.sidebar.info("Nenhuma memória salva ainda.")
-    except Exception as e:
-        st.sidebar.info(f"Memórias indisponíveis: {str(e)[:50]}...")
+    conn = sqlite3.connect("memoria_agente.db")
+    c = conn.cursor()
+    c.execute("SELECT fato FROM memorias WHERE user_email = ? ORDER BY criado_em DESC LIMIT 10", (user_email,))
+    memorias = c.fetchall()
+    conn.close()
+    if memorias:
+        for mem in memorias:
+            st.sidebar.write(f"- {mem[0]}")
+    else:
+        st.sidebar.info("Nenhuma memória salva ainda.")
     
     st.sidebar.markdown("---")
     st.sidebar.write(f"Conectado como: {user_email}")
@@ -191,28 +234,21 @@ for msg in messages:
 chat_prompt = st.chat_input("Digite sua mensagem...")
 
 if chat_prompt:
-    # 1. Salva a mensagem do usuário
+    # Salvar mensagem do usuário
     salvar_mensagem(st.session_state.active_chat_id, user_email, "user", chat_prompt)
     atualizar_titulo_conversa(st.session_state.active_chat_id, chat_prompt)
     
     with st.chat_message("user"):
         st.markdown(chat_prompt)
     
-    # 2. Busca memórias relevantes no Mem0
-    try:
-        memorias_relevantes = memory.search(
-            query=chat_prompt,
-            user_id=user_email,
-            limit=3
-        )
-        texto_memorias = ""
-        if memorias_relevantes and "results" in memorias_relevantes:
-            for mem in memorias_relevantes["results"]:
-                texto_memorias += f"- {mem['memory']}\n"
-    except Exception as e:
-        texto_memorias = "[Erro ao buscar memórias]"
+    # Extrair memórias automaticamente (usa Groq)
+    extrair_memorias_automatico(chat_prompt, user_email, api_key)
     
-    # 3. Gera a resposta do assistente
+    # Buscar memórias relevantes para a pergunta
+    memorias_relevantes = buscar_memorias(user_email, chat_prompt, limit=3)
+    texto_memorias = "\n".join([f"- {mem}" for mem in memorias_relevantes]) if memorias_relevantes else "Nenhuma memória relevante encontrada."
+    
+    # Gerar resposta
     with st.chat_message("assistant"):
         with st.spinner("Pensando..."):
             try:
@@ -220,10 +256,10 @@ if chat_prompt:
                 
                 system_prompt = f"""Você é um assistente especialista em programação, baseado no modelo {active_model} da Groq.
                 
-                MEMÓRIAS SOBRE O USUÁRIO:
-                {texto_memorias if texto_memorias else "Nenhuma memória registrada ainda."}
+                MEMÓRIAS SOBRE O USUÁRIO (extraídas automaticamente):
+                {texto_memorias}
                 
-                Use essas memórias para personalizar suas respostas."""
+                Use essas memórias para personalizar suas respostas. Seja natural e direto."""
                 
                 historico = carregar_historico_chat(st.session_state.active_chat_id)
                 messages_api = [{"role": "system", "content": system_prompt}] + historico
@@ -235,20 +271,8 @@ if chat_prompt:
                 bot_reply = chat_completion.choices[0].message.content
                 st.markdown(bot_reply)
                 
-                # 4. Salva a resposta
+                # Salvar resposta
                 salvar_mensagem(st.session_state.active_chat_id, user_email, "assistant", bot_reply)
-                
-                # 5. Salva a interação na memória do Mem0
-                try:
-                    memory.add(
-                        [
-                            {"role": "user", "content": chat_prompt},
-                            {"role": "assistant", "content": bot_reply}
-                        ],
-                        user_id=user_email
-                    )
-                except Exception as e:
-                    st.warning(f"⚠️ Erro ao salvar memória: {e}")
                 
             except Exception as err:
                 st.error(f"⚠️ Erro: {err}")
